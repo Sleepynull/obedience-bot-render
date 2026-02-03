@@ -2115,7 +2115,7 @@ async def stats(interaction: discord.Interaction, submissive: discord.Member = N
 
 @bot.tree.command(name="timezone", description="Set your timezone for deadline calculations")
 @app_commands.describe(
-    timezone="Timezone (e.g., America/New_York, Europe/London, Asia/Tokyo, UTC)"
+    timezone="Timezone (e.g., EST, CST, PST, GMT, UTC)"
 )
 async def timezone(interaction: discord.Interaction, timezone: str = None):
     """Set or view user's timezone."""
@@ -2139,26 +2139,64 @@ async def timezone(interaction: discord.Interaction, timezone: str = None):
         )
         embed.add_field(name="Current Timezone", value=current_tz, inline=False)
         embed.add_field(name="Your Current Time", value=now.strftime("%Y-%m-%d %H:%M:%S"), inline=False)
-        embed.set_footer(text="Change with: /timezone timezone:<your_timezone>\nExamples: America/New_York, Europe/London, Asia/Tokyo")
+        embed.set_footer(text="Change with: /timezone timezone:<your_timezone>\nExamples: EST, CST, PST, GMT, UTC")
         await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
+        # Map common abbreviations to IANA timezone names
+        tz_map = {
+            # US Timezones
+            'EST': 'America/New_York',
+            'EDT': 'America/New_York',
+            'ET': 'America/New_York',
+            'CST': 'America/Chicago',
+            'CDT': 'America/Chicago',
+            'CT': 'America/Chicago',
+            'MST': 'America/Denver',
+            'MDT': 'America/Denver',
+            'MT': 'America/Denver',
+            'PST': 'America/Los_Angeles',
+            'PDT': 'America/Los_Angeles',
+            'PT': 'America/Los_Angeles',
+            # Europe
+            'GMT': 'Europe/London',
+            'BST': 'Europe/London',
+            'CET': 'Europe/Paris',
+            'CEST': 'Europe/Paris',
+            # Asia
+            'JST': 'Asia/Tokyo',
+            'KST': 'Asia/Seoul',
+            'CST_CHINA': 'Asia/Shanghai',
+            # Australia
+            'AEST': 'Australia/Sydney',
+            'AEDT': 'Australia/Sydney',
+            # Universal
+            'UTC': 'UTC',
+        }
+        
+        # Convert to uppercase for case-insensitive matching
+        tz_upper = timezone.upper()
+        tz_to_use = tz_map.get(tz_upper, timezone)
+        
         # Set new timezone
-        success = await db.set_user_timezone(interaction.user.id, timezone)
+        success = await db.set_user_timezone(interaction.user.id, tz_to_use)
         if success:
-            tz = pytz.timezone(timezone)
+            tz = pytz.timezone(tz_to_use)
             now = datetime.datetime.now(tz)
+            
+            display_name = timezone if tz_upper in tz_map else tz_to_use
             
             embed = discord.Embed(
                 title="✅ Timezone Updated",
-                description=f"Your timezone has been set to **{timezone}**",
+                description=f"Your timezone has been set to **{display_name}**",
                 color=discord.Color.green()
             )
+            embed.add_field(name="IANA Name", value=tz_to_use, inline=False)
             embed.add_field(name="Your Current Time", value=now.strftime("%Y-%m-%d %H:%M:%S"), inline=False)
             embed.set_footer(text="All deadlines will now be calculated in your timezone")
             await interaction.response.send_message(embed=embed, ephemeral=True)
         else:
             await interaction.response.send_message(
-                f"❌ Invalid timezone: '{timezone}'\n\nExamples of valid timezones:\n• America/New_York (EST/EDT)\n• America/Los_Angeles (PST/PDT)\n• Europe/London (GMT/BST)\n• Europe/Paris (CET/CEST)\n• Asia/Tokyo (JST)\n• UTC\n\nSee full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
+                f"❌ Invalid timezone: '{timezone}'\n\nSupported abbreviations:\n• EST/ET (East Coast US)\n• CST/CT (Central US)\n• MST/MT (Mountain US)\n• PST/PT (West Coast US)\n• GMT (UK)\n• CET (Central Europe)\n• JST (Japan)\n• UTC (Universal)\n\nOr use IANA format: America/New_York, Europe/London, etc.",
                 ephemeral=True
             )
 

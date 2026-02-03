@@ -39,9 +39,15 @@ async def init_db():
                 dominant_id INTEGER NOT NULL,
                 title TEXT NOT NULL,
                 description TEXT,
-                frequency TEXT NOT NULL CHECK(frequency IN ('daily', 'weekly')),
+                frequency TEXT NOT NULL CHECK(frequency IN ('daily', 'weekly', 'custom')),
                 point_value INTEGER DEFAULT 10,
                 deadline TIMESTAMP,
+                recurrence_enabled INTEGER DEFAULT 0,
+                recurrence_interval_hours INTEGER,
+                days_of_week TEXT,
+                time_of_day TEXT,
+                last_reset_at TIMESTAMP,
+                next_occurrence TIMESTAMP,
                 auto_reward_id INTEGER,
                 auto_punishment_id INTEGER,
                 active INTEGER DEFAULT 1,
@@ -197,15 +203,53 @@ async def get_dominant(submissive_id: int) -> Optional[Dict[str, Any]]:
 
 # Task operations
 async def create_task(submissive_id: int, dominant_id: int, title: str, 
-                     description: str, frequency: str, point_value: int, deadline: datetime.datetime = None) -> int:
-    """Create a new task."""
+                     description: str, frequency: str, point_value: int, deadline: datetime.datetime = None,
+                     recurrence_enabled: bool = False, recurrence_interval_hours: int = None,
+                     days_of_week: str = None, time_of_day: str = None) -> int:
+    """Create a new task with optional recurring schedule."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Calculate next occurrence if recurring
+        next_occurrence = None
+        if recurrence_enabled and (days_of_week or recurrence_interval_hours):
+            next_occurrence = calculate_next_occurrence(days_of_week, time_of_day, recurrence_interval_hours)
+        
         cursor = await db.execute("""
-            INSERT INTO tasks (submissive_id, dominant_id, title, description, frequency, point_value, deadline)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (submissive_id, dominant_id, title, description, frequency, point_value, deadline))
+            INSERT INTO tasks (
+                submissive_id, dominant_id, title, description, frequency, point_value, deadline,
+                recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (submissive_id, dominant_id, title, description, frequency, point_value, deadline,
+              recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence))
         await db.commit()
         return cursor.lastrowid
+
+def calculate_next_occurrence(days_of_week: str = None, time_of_day: str = None, 
+                             interval_hours: int = None) -> datetime.datetime:
+    """Calculate the next occurrence of a recurring task."""
+    now = datetime.datetime.now()
+    
+    if interval_hours:
+        # Simple interval-based recurrence
+        return now + datetime.timedelta(hours=interval_hours)
+    
+    if days_of_week:
+        # Day-of-week based recurrence (format: "0,2,4" for Mon/Wed/Fri)
+        target_days = [int(d) for d in days_of_week.split(',')]
+        current_day = now.weekday()
+        
+        # Find next occurrence
+        for days_ahead in range(1, 8):
+            future_date = now + datetime.timedelta(days=days_ahead)
+            if future_date.weekday() in target_days:
+                # Set time if specified
+                if time_of_day:
+                    hour, minute = map(int, time_of_day.split(':'))
+                    return future_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                return future_date
+    
+    # Default: 24 hours from now
+    return now + datetime.timedelta(hours=24)
 
 async def get_tasks(submissive_id: int, active_only: bool = True) -> List[Dict[str, Any]]:
     """Get all tasks for a submissive."""
@@ -299,6 +343,41 @@ async def deactivate_expired_task(task_id: int):
     """Mark a task as inactive after deadline expires."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
         await db.execute("UPDATE tasks SET active = 0 WHERE id = ?", (task_id,))
+        await db.commit()
+
+async def get_tasks_to_reset() -> List[Dict[str, Any]]:
+    """Get recurring tasks that need to be reset."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT t.* FROM tasks t
+            WHERE t.recurrence_enabled = 1
+            AND t.active = 1
+            AND t.next_occurrence IS NOT NULL
+            AND t.next_occurrence <= CURRENT_TIMESTAMP
+        """) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def reset_recurring_task(task_id: int, days_of_week: str = None, time_of_day: str = None, 
+                              interval_hours: int = None):
+    """Reset a recurring task and calculate next occurrence."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        next_occurrence = calculate_next_occurrence(days_of_week, time_of_day, interval_hours)
+        
+        # Clear any pending completions for this task
+        await db.execute("""
+            DELETE FROM task_completions 
+            WHERE task_id = ? AND approval_status = 'pending'
+        """, (task_id,))
+        
+        # Update task with new occurrence time
+        await db.execute("""
+            UPDATE tasks 
+            SET last_reset_at = CURRENT_TIMESTAMP, next_occurrence = ?
+            WHERE id = ?
+        """, (next_occurrence, task_id))
+        
         await db.commit()
 
 async def get_task_stats(submissive_id: int, days: int = 7) -> Dict[str, Any]:

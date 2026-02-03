@@ -104,11 +104,41 @@ async def check_deadlines():
         except:
             pass
 
+@tasks.loop(minutes=5)
+async def check_recurring_tasks():
+    """Check for completed recurring tasks that need to be reset."""
+    tasks_to_reset = await db.get_tasks_to_reset()
+    
+    for task in tasks_to_reset:
+        await db.reset_recurring_task(task['id'])
+        
+        # Notify submissive about reset task
+        try:
+            sub_user = await bot.fetch_user(task['submissive_id'])
+            embed = discord.Embed(
+                title="🔄 Task Reset",
+                description=f"Your recurring task **{task['title']}** has been reset and is ready again!",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Frequency", value=task['frequency'].capitalize(), inline=True)
+            embed.add_field(name="Points", value=str(task['point_value']), inline=True)
+            
+            # Show next occurrence if available
+            next_occur = task.get('next_occurrence')
+            if next_occur:
+                next_dt = datetime.datetime.fromisoformat(next_occur)
+                embed.add_field(name="Available Until", value=f"<t:{int(next_dt.timestamp())}:R>", inline=False)
+            
+            await sub_user.send(embed=embed)
+        except:
+            pass
+
 @bot.event
 async def on_ready():
     """Initialize bot when ready."""
     await db.init_db()
     check_deadlines.start()  # Start deadline checker
+    check_recurring_tasks.start()  # Start recurring task reset checker
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s)")
@@ -180,13 +210,18 @@ async def link(interaction: discord.Interaction, submissive: discord.Member):
     submissive="The submissive to assign the task to",
     title="Task title",
     description="Task description",
-    frequency="How often: daily or weekly",
+    frequency="How often the task recurs",
     points="Points earned on completion (default: 10)",
-    deadline_hours="Hours until deadline (optional, e.g., 24 for 1 day)"
+    deadline_hours="Hours until deadline (optional, e.g., 24 for 1 day)",
+    recurring="Enable auto-reset after completion",
+    days_of_week="Days for weekly tasks: Mon,Wed,Fri (use Mon/Tue/Wed/Thu/Fri/Sat/Sun)",
+    time_of_day="Time in HH:MM format (24hr, e.g., 14:30 for 2:30 PM)",
+    interval_hours="For custom: hours between occurrences"
 )
 @app_commands.choices(frequency=[
     app_commands.Choice(name="Daily", value="daily"),
-    app_commands.Choice(name="Weekly", value="weekly")
+    app_commands.Choice(name="Weekly", value="weekly"),
+    app_commands.Choice(name="Custom Interval", value="custom")
 ])
 async def task_add(
     interaction: discord.Interaction,
@@ -195,7 +230,11 @@ async def task_add(
     description: str,
     frequency: app_commands.Choice[str],
     points: int = 10,
-    deadline_hours: int = None
+    deadline_hours: int = None,
+    recurring: bool = False,
+    days_of_week: str = None,
+    time_of_day: str = None,
+    interval_hours: int = None
 ):
     """Add a new task (dominant only)."""
     # Verify dominant
@@ -216,6 +255,16 @@ async def task_add(
         )
         return
     
+    # Process days of week if provided
+    days_of_week_str = None
+    if days_of_week and frequency.value == 'weekly':
+        # Convert day names to weekday numbers
+        day_map = {'mon': 0, 'tue': 1, 'wed': 2, 'thu': 3, 'fri': 4, 'sat': 5, 'sun': 6}
+        day_list = [d.strip().lower()[:3] for d in days_of_week.split(',')]
+        day_numbers = [str(day_map[d]) for d in day_list if d in day_map]
+        if day_numbers:
+            days_of_week_str = ','.join(day_numbers)
+    
     # Calculate deadline
     deadline = None
     if deadline_hours:
@@ -229,7 +278,11 @@ async def task_add(
         description,
         frequency.value,
         points,
-        deadline
+        deadline,
+        recurring,
+        interval_hours,
+        days_of_week_str,
+        time_of_day
     )
     
     embed = discord.Embed(
@@ -241,6 +294,24 @@ async def task_add(
     embed.add_field(name="Description", value=description, inline=False)
     embed.add_field(name="Frequency", value=frequency.value.capitalize(), inline=True)
     embed.add_field(name="Points", value=str(points), inline=True)
+    
+    # Show recurrence info
+    if recurring:
+        recur_info = "🔄 **Auto-Reset Enabled**\n"
+        if frequency.value == 'weekly' and days_of_week_str:
+            day_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+            days = [day_names[int(d)] for d in days_of_week_str.split(',')]
+            recur_info += f"Days: {', '.join(days)}"
+        elif frequency.value == 'custom' and interval_hours:
+            recur_info += f"Every {interval_hours} hours"
+        elif frequency.value == 'daily':
+            recur_info += "Resets daily"
+        
+        if time_of_day:
+            recur_info += f" at {time_of_day}"
+        
+        embed.add_field(name="Recurrence", value=recur_info, inline=False)
+    
     if deadline:
         embed.add_field(name="Deadline", value=f"<t:{int(deadline.timestamp())}:R>", inline=False)
     embed.set_footer(text=f"Task ID: {task_id}")
@@ -314,6 +385,28 @@ async def tasks(interaction: discord.Interaction, submissive: discord.Member = N
     
     for task in tasks_list:
         value = f"{task['description']}\n**Frequency:** {task['frequency'].capitalize()}\n**Points:** {task['point_value']}"
+        
+        # Add recurrence info if enabled
+        if task.get('recurrence_enabled'):
+            recur_parts = []
+            if task['frequency'] == 'weekly' and task.get('days_of_week'):
+                day_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+                days = [day_names[int(d)] for d in task['days_of_week'].split(',')]
+                recur_parts.append(f"Days: {', '.join(days)}")
+            elif task['frequency'] == 'custom' and task.get('recurrence_interval_hours'):
+                recur_parts.append(f"Every {task['recurrence_interval_hours']}h")
+            
+            if task.get('time_of_day'):
+                recur_parts.append(f"at {task['time_of_day']}")
+            
+            if recur_parts:
+                value += f"\n🔄 {' '.join(recur_parts)}"
+        
+        # Add deadline if exists
+        if task.get('deadline'):
+            deadline_dt = datetime.datetime.fromisoformat(task['deadline'])
+            value += f"\n⏰ Deadline: <t:{int(deadline_dt.timestamp())}:R>"
+        
         embed.add_field(
             name=f"{task['id']}. {task['title']}",
             value=value,

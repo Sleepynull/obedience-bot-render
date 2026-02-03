@@ -36,17 +36,28 @@ async def check_deadlines():
         punishment_id = task.get('auto_punishment_id')
         punishment_assigned = False
         assignment_id = None
+        punishment_title = None
         if punishment_id:
-            deadline = datetime.datetime.now() + datetime.timedelta(hours=24)
-            assignment_id = await db.assign_punishment(
-                task['submissive_id'], 
-                task['dominant_id'], 
-                punishment_id, 
-                f"Auto-assigned for missing task: {task['title']}", 
-                deadline, 
-                10
-            )
-            punishment_assigned = True
+            # If punishment_id is -1, assign a random punishment
+            if punishment_id == -1:
+                random_punishment = await db.get_random_punishment(task['dominant_id'])
+                if random_punishment:
+                    punishment_id = random_punishment['id']
+                    punishment_title = random_punishment['title']
+                else:
+                    punishment_id = None  # No punishments available
+            
+            if punishment_id and punishment_id != -1:
+                deadline = datetime.datetime.now() + datetime.timedelta(hours=24)
+                assignment_id = await db.assign_punishment(
+                    task['submissive_id'], 
+                    task['dominant_id'], 
+                    punishment_id, 
+                    f"Auto-assigned for missing task: {task['title']}", 
+                    deadline, 
+                    10
+                )
+                punishment_assigned = True
         
         # Check point thresholds
         thresholds = await db.check_point_thresholds(task['submissive_id'], new_total)
@@ -76,7 +87,10 @@ async def check_deadlines():
             embed.add_field(name="Points Deducted", value=str(points_to_deduct), inline=True)
             embed.add_field(name="New Total", value=str(new_total), inline=True)
             if punishment_assigned:
-                embed.add_field(name="⚠️ Punishment Auto-Assigned", value=f"Assignment ID: {assignment_id}\nDeadline: 24 hours", inline=False)
+                punish_text = f"Assignment ID: {assignment_id}\nDeadline: 24 hours"
+                if punishment_title:
+                    punish_text = f"**{punishment_title}**\n" + punish_text
+                embed.add_field(name="⚠️ Punishment Auto-Assigned", value=punish_text, inline=False)
             await sub_user.send(embed=embed)
         except:
             pass
@@ -268,6 +282,8 @@ async def link(interaction: discord.Interaction, submissive: discord.Member):
     frequency="How often the task recurs",
     points="Points earned on completion (default: 10)",
     deadline_hours="Hours until deadline (optional, e.g., 24 for 1 day)",
+    deadline_datetime="Specific deadline (YYYY-MM-DD HH:MM format, e.g., 2026-02-05 15:30)",
+    auto_punish="Assign random punishment if deadline missed (default: False)",
     recurring="Enable auto-reset after completion",
     days_of_week="Days for weekly tasks: Mon,Wed,Fri (use Mon/Tue/Wed/Thu/Fri/Sat/Sun)",
     time_of_day="Time in HH:MM format (24hr, e.g., 14:30 for 2:30 PM)",
@@ -286,6 +302,8 @@ async def task_add(
     frequency: app_commands.Choice[str],
     points: int = 10,
     deadline_hours: int = None,
+    deadline_datetime: str = None,
+    auto_punish: bool = False,
     recurring: bool = False,
     days_of_week: str = None,
     time_of_day: str = None,
@@ -320,10 +338,33 @@ async def task_add(
         if day_numbers:
             days_of_week_str = ','.join(day_numbers)
     
-    # Calculate deadline
+    # Calculate deadline - prioritize specific datetime over hours
     deadline = None
-    if deadline_hours:
+    if deadline_datetime:
+        try:
+            deadline = datetime.datetime.strptime(deadline_datetime, "%Y-%m-%d %H:%M")
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Invalid datetime format! Use: YYYY-MM-DD HH:MM (e.g., 2026-02-05 15:30)",
+                ephemeral=True
+            )
+            return
+    elif deadline_hours:
         deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
+    
+    # Handle auto-punishment setup
+    auto_punishment_id = None
+    if auto_punish and deadline:
+        # Check if dominant has any punishments
+        punishments = await db.get_punishments(interaction.user.id)
+        if not punishments:
+            await interaction.response.send_message(
+                "❌ Auto-punish enabled but you have no punishments created! Create one first with /punishment_create",
+                ephemeral=True
+            )
+            return
+        # We'll store a flag to assign random punishment on deadline miss
+        auto_punishment_id = -1  # Special flag for random punishment
     
     # Create task
     task_id = await db.create_task(
@@ -337,7 +378,8 @@ async def task_add(
         recurring,
         interval_hours,
         days_of_week_str,
-        time_of_day
+        time_of_day,
+        auto_punishment_id
     )
     
     embed = discord.Embed(
@@ -349,6 +391,9 @@ async def task_add(
     embed.add_field(name="Description", value=description, inline=False)
     embed.add_field(name="Frequency", value=frequency.value.capitalize(), inline=True)
     embed.add_field(name="Points", value=str(points), inline=True)
+    
+    if auto_punish:
+        embed.add_field(name="⚠️ Auto-Punish", value="Random punishment on deadline miss", inline=False)
     
     # Show recurrence info
     if recurring:
@@ -886,6 +931,7 @@ async def punishment_delete(interaction: discord.Interaction, punishment_id: int
     punishment_id="The punishment ID",
     reason="Reason for the punishment (optional)",
     deadline_hours="Hours to complete (default: 24)",
+    deadline_datetime="Specific deadline (YYYY-MM-DD HH:MM format, e.g., 2026-02-05 15:30)",
     point_penalty="Points deducted if not completed (default: 10)",
     forward_to="User who will receive the proof image (optional)"
 )
@@ -895,6 +941,7 @@ async def punishment_assign(
     punishment_id: int,
     reason: str = None,
     deadline_hours: int = 24,
+    deadline_datetime: str = None,
     point_penalty: int = 10,
     forward_to: discord.Member = None
 ):
@@ -907,8 +954,18 @@ async def punishment_assign(
         )
         return
     
-    # Calculate deadline
-    deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
+    # Calculate deadline - prioritize specific datetime over hours
+    if deadline_datetime:
+        try:
+            deadline = datetime.datetime.strptime(deadline_datetime, "%Y-%m-%d %H:%M")
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Invalid datetime format! Use: YYYY-MM-DD HH:MM (e.g., 2026-02-05 15:30)",
+                ephemeral=True
+            )
+            return
+    else:
+        deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
     
     forward_to_id = forward_to.id if forward_to else None
     assignment_id = await db.assign_punishment(
@@ -1398,6 +1455,7 @@ async def threshold_delete(interaction: discord.Interaction, threshold_id: int):
     submissive="The submissive to punish",
     reason="Reason for punishment (optional)",
     deadline_hours="Hours to complete (default: 24)",
+    deadline_datetime="Specific deadline (YYYY-MM-DD HH:MM format, e.g., 2026-02-05 15:30)",
     point_penalty="Points deducted if not completed (default: 10)",
     forward_to="User who will receive the proof image (optional)"
 )
@@ -1406,6 +1464,7 @@ async def punishment_assign_random(
     submissive: discord.Member,
     reason: str = None,
     deadline_hours: int = 24,
+    deadline_datetime: str = None,
     point_penalty: int = 10,
     forward_to: discord.Member = None
 ):
@@ -1427,8 +1486,18 @@ async def punishment_assign_random(
         )
         return
     
-    # Calculate deadline
-    deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
+    # Calculate deadline - prioritize specific datetime over hours
+    if deadline_datetime:
+        try:
+            deadline = datetime.datetime.strptime(deadline_datetime, "%Y-%m-%d %H:%M")
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Invalid datetime format! Use: YYYY-MM-DD HH:MM (e.g., 2026-02-05 15:30)",
+                ephemeral=True
+            )
+            return
+    else:
+        deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
     
     forward_to_id = forward_to.id if forward_to else None
     assignment_id = await db.assign_punishment(
@@ -1869,7 +1938,7 @@ async def help_command(interaction: discord.Interaction):
     
     embed.add_field(
         name="📋 Tasks",
-        value="`/task_add` - Add a new task (with optional deadline)\n`/tasks` - View tasks\n`/task_complete` - Submit task with proof\n`/verify` - Manually verify task (dom)",
+        value="`/task_add` - Add a new task (supports specific deadlines & auto-punish)\n`/tasks` - View tasks\n`/task_complete` - Submit task with proof\n`/verify` - Manually verify task (dom)",
         inline=False
     )
     
@@ -1887,7 +1956,7 @@ async def help_command(interaction: discord.Interaction):
     
     embed.add_field(
         name="⚠️ Punishments",
-        value="`/punishment_create` - Create a punishment\n`/punishments` - View punishments\n`/punishment_assign` - Give a punishment",
+        value="`/punishment_create` - Create a punishment\n`/punishments` - View punishments\n`/punishment_assign` - Assign with specific deadline\n`/punishment_assign_random` - Assign random with deadline",
         inline=False
     )
     

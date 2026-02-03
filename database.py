@@ -235,8 +235,8 @@ async def get_dominants(submissive_id: int) -> List[Dict[str, Any]]:
 async def create_task(submissive_id: int, dominant_id: int, title: str, 
                      description: str, frequency: str, point_value: int, deadline: datetime.datetime = None,
                      recurrence_enabled: bool = False, recurrence_interval_hours: int = None,
-                     days_of_week: str = None, time_of_day: str = None) -> int:
-    """Create a new task with optional recurring schedule."""
+                     days_of_week: str = None, time_of_day: str = None, auto_punishment_id: int = None) -> int:
+    """Create a new task with optional recurring schedule and auto-punishment."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
         # Calculate next occurrence if recurring
         next_occurrence = None
@@ -246,11 +246,11 @@ async def create_task(submissive_id: int, dominant_id: int, title: str,
         cursor = await db.execute("""
             INSERT INTO tasks (
                 submissive_id, dominant_id, title, description, frequency, point_value, deadline,
-                recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence
+                recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence, auto_punishment_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (submissive_id, dominant_id, title, description, frequency, point_value, deadline,
-              recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence))
+              recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence, auto_punishment_id))
         await db.commit()
         return cursor.lastrowid
 

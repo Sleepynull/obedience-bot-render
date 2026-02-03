@@ -208,7 +208,7 @@ async def get_submissives(dominant_id: int) -> List[Dict[str, Any]]:
             return [dict(row) for row in rows]
 
 async def get_dominant(submissive_id: int) -> Optional[Dict[str, Any]]:
-    """Get the dominant for a submissive."""
+    """Get the dominant for a submissive (returns first if multiple exist)."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
@@ -218,6 +218,18 @@ async def get_dominant(submissive_id: int) -> Optional[Dict[str, Any]]:
         """, (submissive_id,)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+async def get_dominants(submissive_id: int) -> List[Dict[str, Any]]:
+    """Get all dominants for a submissive."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT u.* FROM users u
+            JOIN relationships r ON u.user_id = r.dominant_id
+            WHERE r.submissive_id = ?
+        """, (submissive_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
 # Task operations
 async def create_task(submissive_id: int, dominant_id: int, title: str, 

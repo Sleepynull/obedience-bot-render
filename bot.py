@@ -613,22 +613,26 @@ async def rewards(interaction: discord.Interaction):
         )
         return
     
-    # Get dominant ID
+    # Get dominant ID(s)
     if user['role'] == 'dominant':
-        dominant_id = interaction.user.id
+        dominant_ids = [interaction.user.id]
     else:
-        dominant = await db.get_dominant(interaction.user.id)
-        if not dominant:
+        dominants = await db.get_dominants(interaction.user.id)
+        if not dominants:
             await interaction.response.send_message(
                 "❌ You're not linked to a dominant!",
                 ephemeral=True
             )
             return
-        dominant_id = dominant['user_id']
+        dominant_ids = [d['user_id'] for d in dominants]
     
-    rewards_list = await db.get_rewards(dominant_id)
+    # Collect rewards from all dominants
+    all_rewards = []
+    for dominant_id in dominant_ids:
+        rewards_list = await db.get_rewards(dominant_id)
+        all_rewards.extend(rewards_list)
     
-    if not rewards_list:
+    if not all_rewards:
         await interaction.response.send_message(
             "No rewards available yet!",
             ephemeral=True
@@ -640,7 +644,7 @@ async def rewards(interaction: discord.Interaction):
         color=discord.Color.gold()
     )
     
-    for reward in rewards_list:
+    for reward in all_rewards:
         value = f"{reward['description']}\n**Cost:** {reward['point_cost']} points"
         embed.add_field(
             name=f"{reward['id']}. {reward['title']}",
@@ -810,22 +814,26 @@ async def punishments(interaction: discord.Interaction):
         )
         return
     
-    # Get dominant ID
+    # Get dominant ID(s)
     if user['role'] == 'dominant':
-        dominant_id = interaction.user.id
+        dominant_ids = [interaction.user.id]
     else:
-        dominant = await db.get_dominant(interaction.user.id)
-        if not dominant:
+        dominants = await db.get_dominants(interaction.user.id)
+        if not dominants:
             await interaction.response.send_message(
                 "❌ You're not linked to a dominant!",
                 ephemeral=True
             )
             return
-        dominant_id = dominant['user_id']
+        dominant_ids = [d['user_id'] for d in dominants]
     
-    punishments_list = await db.get_punishments(dominant_id)
+    # Collect punishments from all dominants
+    all_punishments = []
+    for dominant_id in dominant_ids:
+        punishments_list = await db.get_punishments(dominant_id)
+        all_punishments.extend(punishments_list)
     
-    if not punishments_list:
+    if not all_punishments:
         await interaction.response.send_message(
             "No punishments available yet!",
             ephemeral=True
@@ -837,7 +845,7 @@ async def punishments(interaction: discord.Interaction):
         color=discord.Color.red()
     )
     
-    for punishment in punishments_list:
+    for punishment in all_punishments:
         embed.add_field(
             name=f"{punishment['id']}. {punishment['title']}",
             value=punishment['description'],

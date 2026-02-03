@@ -107,8 +107,16 @@ async def init_db():
                 item_id INTEGER NOT NULL,
                 reason TEXT,
                 assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                deadline TIMESTAMP,
+                point_penalty INTEGER DEFAULT 0,
+                proof_url TEXT,
+                completion_status TEXT DEFAULT 'pending' CHECK(completion_status IN ('pending', 'submitted', 'approved', 'rejected', 'expired')),
+                submitted_at TIMESTAMP,
+                reviewed_by INTEGER,
+                reviewed_at TIMESTAMP,
                 FOREIGN KEY (submissive_id) REFERENCES users(user_id),
-                FOREIGN KEY (dominant_id) REFERENCES users(user_id)
+                FOREIGN KEY (dominant_id) REFERENCES users(user_id),
+                FOREIGN KEY (reviewed_by) REFERENCES users(user_id)
             )
         """)
         
@@ -371,15 +379,116 @@ async def get_punishments(dominant_id: int) -> List[Dict[str, Any]]:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-async def assign_punishment(submissive_id: int, dominant_id: int, punishment_id: int, reason: str = None) -> bool:
-    """Assign a punishment to a submissive."""
+async def assign_punishment(submissive_id: int, dominant_id: int, punishment_id: int, 
+                          reason: str = None, deadline: datetime.datetime = None, point_penalty: int = 10) -> int:
+    """Assign a punishment to a submissive with deadline and point penalty."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        cursor = await db.execute("""
+            INSERT INTO assigned_rewards_punishments 
+            (submissive_id, dominant_id, type, item_id, reason, deadline, point_penalty, completion_status)
+            VALUES (?, ?, 'punishment', ?, ?, ?, ?, 'pending')
+        """, (submissive_id, dominant_id, punishment_id, reason, deadline, point_penalty))
+        await db.commit()
+        return cursor.lastrowid
+
+async def submit_punishment_proof(assignment_id: int, proof_url: str) -> bool:
+    """Submit proof of punishment completion."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
         await db.execute("""
-            INSERT INTO assigned_rewards_punishments (submissive_id, dominant_id, type, item_id, reason)
-            VALUES (?, ?, 'punishment', ?, ?)
-        """, (submissive_id, dominant_id, punishment_id, reason))
+            UPDATE assigned_rewards_punishments 
+            SET proof_url = ?, completion_status = 'submitted', submitted_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND type = 'punishment' AND completion_status = 'pending'
+        """, (proof_url, assignment_id))
         await db.commit()
         return True
+
+async def approve_punishment_completion(assignment_id: int, reviewer_id: int, approved: bool) -> Optional[int]:
+    """Approve or reject punishment proof. Returns penalty if approved (to refund if late)."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Get assignment info
+        async with db.execute("""
+            SELECT submissive_id, point_penalty, completion_status 
+            FROM assigned_rewards_punishments 
+            WHERE id = ? AND type = 'punishment'
+        """, (assignment_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row or row[2] not in ('submitted', 'expired'):
+                return None
+            submissive_id, penalty, status = row
+        
+        new_status = 'approved' if approved else 'rejected'
+        
+        # Update assignment
+        await db.execute("""
+            UPDATE assigned_rewards_punishments 
+            SET completion_status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (new_status, reviewer_id, assignment_id))
+        
+        await db.commit()
+        return penalty if approved and status == 'expired' else 0
+
+async def get_pending_punishments(dominant_id: int) -> List[Dict[str, Any]]:
+    """Get pending punishment proofs for review."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT ap.*, p.title, p.description, u.username as submissive_name
+            FROM assigned_rewards_punishments ap
+            JOIN punishments p ON ap.item_id = p.id
+            JOIN users u ON ap.submissive_id = u.user_id
+            WHERE ap.dominant_id = ? AND ap.type = 'punishment' 
+            AND ap.completion_status IN ('submitted', 'expired')
+            ORDER BY ap.submitted_at ASC
+        """, (dominant_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def get_active_punishments(submissive_id: int) -> List[Dict[str, Any]]:
+    """Get active punishments for a submissive."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT ap.*, p.title, p.description
+            FROM assigned_rewards_punishments ap
+            JOIN punishments p ON ap.item_id = p.id
+            WHERE ap.submissive_id = ? AND ap.type = 'punishment' 
+            AND ap.completion_status = 'pending'
+            ORDER BY ap.deadline ASC
+        """, (submissive_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def get_expired_punishments() -> List[Dict[str, Any]]:
+    """Get punishments that passed deadline without proof."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT * FROM assigned_rewards_punishments
+            WHERE type = 'punishment'
+            AND completion_status = 'pending'
+            AND deadline IS NOT NULL
+            AND deadline < CURRENT_TIMESTAMP
+        """) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def expire_punishment(assignment_id: int, double_penalty: bool = True):
+    """Mark punishment as expired and optionally double the penalty."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        if double_penalty:
+            await db.execute("""
+                UPDATE assigned_rewards_punishments 
+                SET completion_status = 'expired', point_penalty = point_penalty * 2
+                WHERE id = ?
+            """, (assignment_id,))
+        else:
+            await db.execute("""
+                UPDATE assigned_rewards_punishments 
+                SET completion_status = 'expired'
+                WHERE id = ?
+            """, (assignment_id,))
+        await db.commit()
 
 async def get_assigned_items(submissive_id: int, item_type: str = None) -> List[Dict[str, Any]]:
     """Get assigned rewards or punishments for a submissive."""

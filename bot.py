@@ -23,7 +23,8 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 @tasks.loop(minutes=5)
 async def check_deadlines():
-    """Check for expired tasks and deduct points."""
+    """Check for expired tasks and punishments, deduct points."""
+    # Check expired tasks
     expired_tasks = await db.get_expired_tasks()
     
     for task in expired_tasks:
@@ -58,6 +59,47 @@ async def check_deadlines():
             )
             embed.add_field(name="Submissive ID", value=str(task['submissive_id']), inline=True)
             embed.add_field(name="Points Deducted", value=str(points_to_deduct), inline=True)
+            await dom_user.send(embed=embed)
+        except:
+            pass
+    
+    # Check expired punishments
+    expired_punishments = await db.get_expired_punishments()
+    
+    for punishment in expired_punishments:
+        # Double the penalty and deduct points
+        penalty = punishment['point_penalty']
+        doubled_penalty = penalty * 2
+        new_total = await db.update_points(punishment['submissive_id'], -doubled_penalty)
+        
+        # Mark as expired and double penalty
+        await db.expire_punishment(punishment['id'], double_penalty=True)
+        
+        # Notify submissive
+        try:
+            sub_user = await bot.fetch_user(punishment['submissive_id'])
+            embed = discord.Embed(
+                title="⏰ Punishment Deadline Missed",
+                description=f"You missed the deadline for punishment assignment #{punishment['id']}",
+                color=discord.Color.dark_red()
+            )
+            embed.add_field(name="Penalty Doubled", value=f"-{doubled_penalty} points (was -{penalty})", inline=True)
+            embed.add_field(name="New Total", value=str(new_total), inline=True)
+            embed.set_footer(text="You can still submit proof - approval will refund the penalty")
+            await sub_user.send(embed=embed)
+        except:
+            pass
+        
+        # Notify dominant
+        try:
+            dom_user = await bot.fetch_user(punishment['dominant_id'])
+            embed = discord.Embed(
+                title="⏰ Punishment Deadline Expired",
+                description=f"Punishment assignment #{punishment['id']} expired without proof.",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="Submissive ID", value=str(punishment['submissive_id']), inline=True)
+            embed.add_field(name="Penalty Doubled", value=f"-{doubled_penalty} points", inline=True)
             await dom_user.send(embed=embed)
         except:
             pass
@@ -554,15 +596,19 @@ async def punishments(interaction: discord.Interaction):
 @app_commands.describe(
     submissive="The submissive to punish",
     punishment_id="The punishment ID",
-    reason="Reason for the punishment (optional)"
+    reason="Reason for the punishment (optional)",
+    deadline_hours="Hours to complete (default: 24)",
+    point_penalty="Points deducted if not completed (default: 10)"
 )
 async def punishment_assign(
     interaction: discord.Interaction,
     submissive: discord.Member,
     punishment_id: int,
-    reason: str = None
+    reason: str = None,
+    deadline_hours: int = 24,
+    point_penalty: int = 10
 ):
-    """Assign a punishment (dominant only)."""
+    """Assign a punishment with proof requirement and deadline (dominant only)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
         await interaction.response.send_message(
@@ -571,20 +617,265 @@ async def punishment_assign(
         )
         return
     
-    await db.assign_punishment(submissive.id, interaction.user.id, punishment_id, reason)
+    # Calculate deadline
+    deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
     
-    await interaction.response.send_message(
-        f"⚠️ Punishment assigned to {submissive.mention}!"
+    assignment_id = await db.assign_punishment(
+        submissive.id, 
+        interaction.user.id, 
+        punishment_id, 
+        reason, 
+        deadline, 
+        point_penalty
     )
+    
+    embed = discord.Embed(
+        title="⚠️ Punishment Assigned",
+        description=f"Punishment assigned to {submissive.mention}",
+        color=discord.Color.red()
+    )
+    embed.add_field(name="Punishment ID", value=str(punishment_id), inline=True)
+    embed.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
+    embed.add_field(name="Deadline", value=f"<t:{int(deadline.timestamp())}:R>", inline=False)
+    embed.add_field(name="Point Penalty", value=f"{point_penalty} (doubles if late)", inline=True)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
     
     # Notify submissive
     try:
-        msg = f"⚠️ **You've been given a punishment by {interaction.user.display_name}!**"
+        notif = discord.Embed(
+            title="⚠️ Punishment Assigned",
+            description=f"**{interaction.user.display_name}** has assigned you a punishment.",
+            color=discord.Color.red()
+        )
+        notif.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
+        notif.add_field(name="Deadline", value=f"<t:{int(deadline.timestamp())}:R>", inline=False)
+        notif.add_field(name="Point Penalty", value=f"-{point_penalty} points (doubles to -{point_penalty * 2} if late!)", inline=False)
         if reason:
-            msg += f"\nReason: {reason}"
-        await submissive.send(msg)
+            notif.add_field(name="Reason", value=reason, inline=False)
+        notif.set_footer(text=f"Submit proof with: /punishment_complete {assignment_id} proof:<image>")
+        await submissive.send(embed=notif)
     except:
         pass
+
+@bot.tree.command(name="punishment_complete", description="Submit proof of punishment completion")
+@app_commands.describe(
+    assignment_id="The punishment assignment ID",
+    proof="Image proof of punishment completion (required)"
+)
+async def punishment_complete(interaction: discord.Interaction, assignment_id: int, proof: discord.Attachment):
+    """Submit proof of punishment completion."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'submissive':
+        await interaction.response.send_message(
+            "❌ Only submissives can complete punishments!",
+            ephemeral=True
+        )
+        return
+    
+    # Require proof
+    if not proof or not proof.content_type or not proof.content_type.startswith('image/'):
+        await interaction.response.send_message(
+            "❌ You must attach image proof!",
+            ephemeral=True
+        )
+        return
+    
+    # Submit proof
+    await db.submit_punishment_proof(assignment_id, proof.url)
+    
+    embed = discord.Embed(
+        title="📤 Punishment Proof Submitted",
+        description="Your punishment completion proof has been submitted for review.",
+        color=discord.Color.orange()
+    )
+    embed.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
+    embed.set_image(url=proof.url)
+    embed.set_footer(text="You'll be notified when reviewed")
+    
+    await interaction.response.send_message(embed=embed)
+    
+    # Notify dominant
+    dominant = await db.get_dominant(interaction.user.id)
+    if dominant:
+        try:
+            dom_user = await bot.fetch_user(dominant['user_id'])
+            notif = discord.Embed(
+                title="📥 Punishment Proof Submitted",
+                description=f"**{interaction.user.display_name}** submitted punishment proof.",
+                color=discord.Color.blue()
+            )
+            notif.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
+            notif.set_image(url=proof.url)
+            notif.set_footer(text=f"Use /punishment_approve {assignment_id} or /punishment_reject {assignment_id}")
+            await dom_user.send(embed=notif)
+        except:
+            pass
+
+@bot.tree.command(name="punishment_approve", description="Approve a punishment completion")
+@app_commands.describe(assignment_id="The punishment assignment ID")
+async def punishment_approve(interaction: discord.Interaction, assignment_id: int):
+    """Approve punishment completion (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can approve punishments!",
+            ephemeral=True
+        )
+        return
+    
+    refund_penalty = await db.approve_punishment_completion(assignment_id, interaction.user.id, True)
+    if refund_penalty is None:
+        await interaction.response.send_message(
+            "❌ Punishment not found or already reviewed!",
+            ephemeral=True
+        )
+        return
+    
+    # Get assignment details
+    import aiosqlite
+    async with aiosqlite.connect(db.DATABASE_NAME) as database:
+        database.row_factory = aiosqlite.Row
+        async with database.execute(
+            "SELECT submissive_id, point_penalty FROM assigned_rewards_punishments WHERE id = ?",
+            (assignment_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                submissive_id = row[0]
+                penalty = row[1]
+                
+                # If it was late, refund the penalty
+                if refund_penalty > 0:
+                    new_total = await db.update_points(submissive_id, refund_penalty)
+                    desc = f"Punishment #{assignment_id} approved.\n✨ **Late penalty refunded!**"
+                else:
+                    new_total = await db.get_user(submissive_id)
+                    new_total = new_total['points'] if new_total else 0
+                    desc = f"Punishment #{assignment_id} approved."
+                
+                embed = discord.Embed(
+                    title="✅ Punishment Approved",
+                    description=desc,
+                    color=discord.Color.green()
+                )
+                if refund_penalty > 0:
+                    embed.add_field(name="Refunded", value=f"+{refund_penalty} points", inline=True)
+                
+                await interaction.response.send_message(embed=embed)
+                
+                # Notify submissive
+                try:
+                    sub_user = await bot.fetch_user(submissive_id)
+                    notif_desc = f"Your punishment completion was approved!"
+                    if refund_penalty > 0:
+                        notif_desc += f"\n🎉 **Penalty refunded: +{refund_penalty} points!**"
+                    
+                    notif = discord.Embed(
+                        title="✅ Punishment Approved",
+                        description=notif_desc,
+                        color=discord.Color.green()
+                    )
+                    notif.add_field(name="Total Points", value=str(new_total), inline=True)
+                    await sub_user.send(embed=notif)
+                except:
+                    pass
+
+@bot.tree.command(name="punishment_reject", description="Reject a punishment completion")
+@app_commands.describe(
+    assignment_id="The punishment assignment ID",
+    reason="Reason for rejection"
+)
+async def punishment_reject(interaction: discord.Interaction, assignment_id: int, reason: str = None):
+    """Reject punishment completion (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can reject punishments!",
+            ephemeral=True
+        )
+        return
+    
+    result = await db.approve_punishment_completion(assignment_id, interaction.user.id, False)
+    if result is None:
+        await interaction.response.send_message(
+            "❌ Punishment not found or already reviewed!",
+            ephemeral=True
+        )
+        return
+    
+    embed = discord.Embed(
+        title="❌ Punishment Rejected",
+        description=f"Punishment #{assignment_id} rejected.",
+        color=discord.Color.red()
+    )
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+    
+    # Notify submissive
+    import aiosqlite
+    async with aiosqlite.connect(db.DATABASE_NAME) as database:
+        database.row_factory = aiosqlite.Row
+        async with database.execute(
+            "SELECT submissive_id FROM assigned_rewards_punishments WHERE id = ?",
+            (assignment_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                try:
+                    sub_user = await bot.fetch_user(row[0])
+                    notif = discord.Embed(
+                        title="❌ Punishment Rejected",
+                        description="Your punishment proof was rejected. You must resubmit.",
+                        color=discord.Color.red()
+                    )
+                    if reason:
+                        notif.add_field(name="Reason", value=reason, inline=False)
+                    await sub_user.send(embed=notif)
+                except:
+                    pass
+
+@bot.tree.command(name="punishments_active", description="View your active punishments")
+async def punishments_active(interaction: discord.Interaction):
+    """View active punishments (submissive only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'submissive':
+        await interaction.response.send_message(
+            "❌ Only submissives can view active punishments!",
+            ephemeral=True
+        )
+        return
+    
+    active_list = await db.get_active_punishments(interaction.user.id)
+    
+    if not active_list:
+        await interaction.response.send_message(
+            "✅ No active punishments!",
+            ephemeral=True
+        )
+        return
+    
+    embed = discord.Embed(
+        title="⚠️ Your Active Punishments",
+        description=f"{len(active_list)} punishment(s) pending",
+        color=discord.Color.red()
+    )
+    
+    for item in active_list[:10]:
+        deadline_ts = int(datetime.datetime.fromisoformat(item['deadline']).timestamp()) if item['deadline'] else 0
+        value = f"**{item['title']}**\n{item['description']}\n**Penalty:** -{item['point_penalty']} points (doubles if late!)\n**Deadline:** <t:{deadline_ts}:R>"
+        embed.add_field(
+            name=f"Assignment ID: {item['id']}",
+            value=value,
+            inline=False
+        )
+    
+    embed.set_footer(text="Submit proof with /punishment_complete <id> proof:<image>")
+    await interaction.response.send_message(embed=embed)
 
 # ============ APPROVAL COMMANDS ============
 

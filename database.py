@@ -133,6 +133,7 @@ async def init_db():
                 deadline TIMESTAMP,
                 point_penalty INTEGER DEFAULT 0,
                 proof_url TEXT,
+                forward_to_user_id INTEGER,
                 completion_status TEXT DEFAULT 'pending' CHECK(completion_status IN ('pending', 'submitted', 'approved', 'rejected', 'expired')),
                 submitted_at TIMESTAMP,
                 reviewed_by INTEGER,
@@ -546,16 +547,27 @@ async def get_punishments(dominant_id: int) -> List[Dict[str, Any]]:
             return [dict(row) for row in rows]
 
 async def assign_punishment(submissive_id: int, dominant_id: int, punishment_id: int, 
-                          reason: str = None, deadline: datetime.datetime = None, point_penalty: int = 10) -> int:
+                          reason: str = None, deadline: datetime.datetime = None, point_penalty: int = 10,
+                          forward_to_user_id: int = None) -> int:
     """Assign a punishment to a submissive with deadline and point penalty."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
         cursor = await db.execute("""
             INSERT INTO assigned_rewards_punishments 
-            (submissive_id, dominant_id, type, item_id, reason, deadline, point_penalty, completion_status)
-            VALUES (?, ?, 'punishment', ?, ?, ?, ?, 'pending')
-        """, (submissive_id, dominant_id, punishment_id, reason, deadline, point_penalty))
+            (submissive_id, dominant_id, type, item_id, reason, deadline, point_penalty, forward_to_user_id, completion_status)
+            VALUES (?, ?, 'punishment', ?, ?, ?, ?, ?, 'pending')
+        """, (submissive_id, dominant_id, punishment_id, reason, deadline, point_penalty, forward_to_user_id))
         await db.commit()
         return cursor.lastrowid
+
+async def get_punishment_forward_user(assignment_id: int) -> Optional[int]:
+    """Get the forward_to_user_id for a punishment assignment."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        async with db.execute(
+            "SELECT forward_to_user_id FROM assigned_rewards_punishments WHERE id = ? AND type = 'punishment'",
+            (assignment_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else None
 
 async def submit_punishment_proof(assignment_id: int, proof_url: str) -> bool:
     """Submit proof of punishment completion."""

@@ -857,7 +857,8 @@ async def punishment_delete(interaction: discord.Interaction, punishment_id: int
     punishment_id="The punishment ID",
     reason="Reason for the punishment (optional)",
     deadline_hours="Hours to complete (default: 24)",
-    point_penalty="Points deducted if not completed (default: 10)"
+    point_penalty="Points deducted if not completed (default: 10)",
+    forward_to="User who will receive the proof image (optional)"
 )
 async def punishment_assign(
     interaction: discord.Interaction,
@@ -865,7 +866,8 @@ async def punishment_assign(
     punishment_id: int,
     reason: str = None,
     deadline_hours: int = 24,
-    point_penalty: int = 10
+    point_penalty: int = 10,
+    forward_to: discord.Member = None
 ):
     """Assign a punishment with proof requirement and deadline (dominant only)."""
     user = await db.get_user(interaction.user.id)
@@ -879,13 +881,15 @@ async def punishment_assign(
     # Calculate deadline
     deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
     
+    forward_to_id = forward_to.id if forward_to else None
     assignment_id = await db.assign_punishment(
         submissive.id, 
         interaction.user.id, 
         punishment_id, 
         reason, 
         deadline, 
-        point_penalty
+        point_penalty,
+        forward_to_id
     )
     
     embed = discord.Embed(
@@ -899,6 +903,8 @@ async def punishment_assign(
     embed.add_field(name="Point Penalty", value=f"{point_penalty} (doubles if late)", inline=True)
     if reason:
         embed.add_field(name="Reason", value=reason, inline=False)
+    if forward_to:
+        embed.add_field(name="📸 Image Forward", value=f"Proof will be sent to {forward_to.mention}", inline=False)
     
     await interaction.response.send_message(embed=embed)
     
@@ -914,6 +920,8 @@ async def punishment_assign(
         notif.add_field(name="Point Penalty", value=f"-{point_penalty} points (doubles to -{point_penalty * 2} if late!)", inline=False)
         if reason:
             notif.add_field(name="Reason", value=reason, inline=False)
+        if forward_to:
+            notif.add_field(name="📸 Image Forward", value=f"⚠️ Your proof will be sent to {forward_to.display_name}", inline=False)
         notif.set_footer(text=f"Submit proof with: /punishment_complete {assignment_id} proof:<image>")
         await submissive.send(embed=notif)
     except:
@@ -945,12 +953,33 @@ async def punishment_complete(interaction: discord.Interaction, assignment_id: i
     # Submit proof
     await db.submit_punishment_proof(assignment_id, proof.url)
     
+    # Check if proof should be forwarded to another user
+    forward_user_id = await db.get_punishment_forward_user(assignment_id)
+    forwarded = False
+    if forward_user_id:
+        try:
+            forward_user = await bot.fetch_user(forward_user_id)
+            forward_embed = discord.Embed(
+                title="📸 Punishment Proof Received",
+                description=f"**{interaction.user.display_name}** completed a punishment.",
+                color=discord.Color.purple()
+            )
+            forward_embed.add_field(name="Submissive", value=interaction.user.mention, inline=True)
+            forward_embed.set_image(url=proof.url)
+            forward_embed.set_footer(text=f"Assignment ID: {assignment_id}")
+            await forward_user.send(embed=forward_embed)
+            forwarded = True
+        except:
+            pass
+    
     embed = discord.Embed(
         title="📤 Punishment Proof Submitted",
         description="Your punishment completion proof has been submitted for review.",
         color=discord.Color.orange()
     )
     embed.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
+    if forwarded:
+        embed.add_field(name="📸 Image Forwarded", value="✅ Sent to designated user", inline=True)
     embed.set_image(url=proof.url)
     embed.set_footer(text="You'll be notified when reviewed")
     
@@ -967,6 +996,8 @@ async def punishment_complete(interaction: discord.Interaction, assignment_id: i
                 color=discord.Color.blue()
             )
             notif.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
+            if forwarded:
+                notif.add_field(name="Forwarded", value="✅ Sent to designated user", inline=True)
             notif.set_image(url=proof.url)
             notif.set_footer(text=f"Use /punishment_approve {assignment_id} or /punishment_reject {assignment_id}")
             await dom_user.send(embed=notif)
@@ -1269,14 +1300,16 @@ async def threshold_delete(interaction: discord.Interaction, threshold_id: int):
     submissive="The submissive to punish",
     reason="Reason for punishment (optional)",
     deadline_hours="Hours to complete (default: 24)",
-    point_penalty="Points deducted if not completed (default: 10)"
+    point_penalty="Points deducted if not completed (default: 10)",
+    forward_to="User who will receive the proof image (optional)"
 )
 async def punishment_assign_random(
     interaction: discord.Interaction,
     submissive: discord.Member,
     reason: str = None,
     deadline_hours: int = 24,
-    point_penalty: int = 10
+    point_penalty: int = 10,
+    forward_to: discord.Member = None
 ):
     """Assign random punishment (dominant only)."""
     user = await db.get_user(interaction.user.id)
@@ -1299,13 +1332,15 @@ async def punishment_assign_random(
     # Calculate deadline
     deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
     
+    forward_to_id = forward_to.id if forward_to else None
     assignment_id = await db.assign_punishment(
         submissive.id,
         interaction.user.id,
         punishment['id'],
         reason or "Random punishment",
         deadline,
-        point_penalty
+        point_penalty,
+        forward_to_id
     )
     
     embed = discord.Embed(
@@ -1319,6 +1354,8 @@ async def punishment_assign_random(
     embed.add_field(name="Point Penalty", value=f"{point_penalty} (doubles if late)", inline=True)
     if reason:
         embed.add_field(name="Reason", value=reason, inline=False)
+    if forward_to:
+        embed.add_field(name="📸 Image Forward", value=f"Proof will be sent to {forward_to.mention}", inline=False)
     
     await interaction.response.send_message(embed=embed)
     
@@ -1336,6 +1373,8 @@ async def punishment_assign_random(
         notif.add_field(name="Point Penalty", value=f"-{point_penalty} points (doubles to -{point_penalty * 2} if late!)", inline=False)
         if reason:
             notif.add_field(name="Reason", value=reason, inline=False)
+        if forward_to:
+            notif.add_field(name="📸 Image Forward", value=f"⚠️ Your proof will be sent to {forward_to.display_name}", inline=False)
         notif.set_footer(text=f"Submit proof with: /punishment_complete {assignment_id} proof:<image>")
         await submissive.send(embed=notif)
     except:

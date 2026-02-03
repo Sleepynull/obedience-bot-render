@@ -144,12 +144,22 @@ A Discord bot for BDSM-themed habit tracking with tasks, rewards, punishments, a
 ## Important Notes
 
 ### Database Persistence
-⚠️ **Render's free tier has ephemeral storage** - your database will reset when the service restarts or redeploys.
+✅ **This bot now uses Render Disks for persistent storage!**
 
-**Options:**
-- **Upgrade to Render's Starter plan ($7/month)** - includes persistent disk storage
-- **Use an external database** - Connect PostgreSQL from Railway, Supabase, or PlanetScale (free tiers available)
-- **Accept data loss** - Fine for testing or casual use where occasional resets are acceptable
+The `render.yaml` file configures a 1GB persistent disk at `/data` that keeps your database between deployments.
+
+**On first deployment:**
+1. Render will automatically create the persistent disk
+2. Your database will be stored at `/data/obedience.db`
+3. All data (users, tasks, rewards, punishments) will persist across redeploys
+
+**Free tier note:** Render's free tier includes persistent disks, but the service may spin down after 15 minutes of inactivity. When it spins back up, your data will still be there!
+
+**Manual deployment** (if not using render.yaml):
+- In Render dashboard, go to your service settings
+- Click "Disks" tab
+- Add a new disk: Name=`obedience-data`, Mount Path=`/data`, Size=`1GB`
+- Redeploy the service
 
 ### Updating the Bot
 Every time you push code changes to GitHub, Render will automatically redeploy your bot.

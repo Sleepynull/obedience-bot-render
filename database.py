@@ -1,9 +1,15 @@
 import aiosqlite
 import datetime
 import pytz
+import os
 from typing import Optional, List, Dict, Any
 
-DATABASE_NAME = "obedience.db"
+# Use persistent storage path if available (for Render.com deployment)
+# Otherwise use local directory for development
+DATA_DIR = os.environ.get('DATA_DIR', '/data') if os.path.exists('/data') else '.'
+DATABASE_NAME = os.path.join(DATA_DIR, "obedience.db")
+
+print(f"Using database path: {DATABASE_NAME}")
 
 async def init_db():
     """Initialize the database with required tables."""

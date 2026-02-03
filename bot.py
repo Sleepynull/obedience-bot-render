@@ -488,7 +488,7 @@ async def reward_assign(
     reward_id: int,
     reason: str = None
 ):
-    """Assign a reward (dominant only)."""
+    """Assign a reward and deduct points (dominant only)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
         await interaction.response.send_message(
@@ -497,18 +497,72 @@ async def reward_assign(
         )
         return
     
+    # Get reward details
+    import aiosqlite
+    async with aiosqlite.connect(db.DATABASE_NAME) as database:
+        database.row_factory = aiosqlite.Row
+        async with database.execute(
+            "SELECT * FROM rewards WHERE id = ? AND dominant_id = ?",
+            (reward_id, interaction.user.id)
+        ) as cursor:
+            reward = await cursor.fetchone()
+            if not reward:
+                await interaction.response.send_message(
+                    "❌ Reward not found!",
+                    ephemeral=True
+                )
+                return
+            reward = dict(reward)
+    
+    # Check if submissive can afford it
+    sub_user = await db.get_user(submissive.id)
+    if not sub_user:
+        await interaction.response.send_message(
+            "❌ Submissive not registered!",
+            ephemeral=True
+        )
+        return
+    
+    if sub_user['points'] < reward['point_cost']:
+        await interaction.response.send_message(
+            f"❌ {submissive.mention} doesn't have enough points! (Has: {sub_user['points']}, Needs: {reward['point_cost']})",
+            ephemeral=True
+        )
+        return
+    
+    # Deduct points
+    new_total = await db.update_points(submissive.id, -reward['point_cost'])
+    
+    # Assign reward
     await db.assign_reward(submissive.id, interaction.user.id, reward_id, reason)
     
-    await interaction.response.send_message(
-        f"🎁 Reward assigned to {submissive.mention}!"
+    embed = discord.Embed(
+        title="🎁 Reward Assigned",
+        description=f"Reward given to {submissive.mention}",
+        color=discord.Color.gold()
     )
+    embed.add_field(name="Reward", value=reward['title'], inline=False)
+    embed.add_field(name="Cost", value=f"-{reward['point_cost']} points", inline=True)
+    embed.add_field(name="New Balance", value=f"{new_total} points", inline=True)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
     
     # Notify submissive
     try:
-        msg = f"🎁 **You've been given a reward by {interaction.user.display_name}!**"
+        notif = discord.Embed(
+            title="🎉 Reward Received!",
+            description=f"**{interaction.user.display_name}** has given you a reward!",
+            color=discord.Color.gold()
+        )
+        notif.add_field(name="Reward", value=reward['title'], inline=False)
+        notif.add_field(name="Description", value=reward['description'], inline=False)
+        notif.add_field(name="Cost", value=f"-{reward['point_cost']} points", inline=True)
+        notif.add_field(name="New Balance", value=f"{new_total} points", inline=True)
         if reason:
-            msg += f"\nReason: {reason}"
-        await submissive.send(msg)
+            notif.add_field(name="Reason", value=reason, inline=False)
+        await submissive.send(embed=notif)
     except:
         pass
 
@@ -961,11 +1015,16 @@ async def approve(interaction: discord.Interaction, completion_id: int):
                     notif.add_field(name="Points Earned", value=str(points_to_award), inline=True)
                     notif.add_field(name="Total Points", value=str(new_total), inline=True)
                     
-                    # Add newly affordable rewards notification
+                    # Add newly affordable rewards notification (show the most expensive newly unlocked)
                     if newly_affordable:
-                        rewards_text = "\n".join([f"✨ **{r['title']}** ({r['point_cost']} points)" for r in newly_affordable[:3]])
-                        notif.add_field(name="🎁 New Rewards Available!", value=rewards_text, inline=False)
-                        notif.set_footer(text="You can now afford these rewards!")
+                        # Sort by cost descending and show the highest newly unlocked reward
+                        most_valuable = sorted(newly_affordable, key=lambda r: r['point_cost'], reverse=True)[0]
+                        notif.add_field(
+                            name="🎉 New Reward Unlocked!",
+                            value=f"✨ **{most_valuable['title']}**\n{most_valuable['description']}\n💰 **Cost:** {most_valuable['point_cost']} points",
+                            inline=False
+                        )
+                        notif.set_footer(text="You've reached a new reward threshold!")
                     
                     await sub_user.send(embed=notif)
                 except:

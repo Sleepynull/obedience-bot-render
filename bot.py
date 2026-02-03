@@ -8,6 +8,7 @@ import io
 import matplotlib
 import datetime
 import pytz
+import config  # Import server configuration
 matplotlib.use('Agg')  # Non-GUI backend
 import matplotlib.pyplot as plt
 
@@ -21,6 +22,33 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Server access check function
+def is_server_allowed(guild_id: int = None) -> bool:
+    """Check if command can be executed in this server/DM."""
+    # Handle DMs
+    if guild_id is None:
+        return config.ALLOW_DMS
+    
+    # Handle server whitelist
+    if config.SERVER_MODE == "whitelist":
+        return guild_id in config.ALLOWED_SERVERS
+    
+    # Global mode - all servers allowed
+    return True
+
+# Global interaction check for all commands
+@bot.tree.interaction_check
+async def interaction_check(interaction: discord.Interaction) -> bool:
+    """Check if interaction is allowed before processing any command."""
+    guild_id = interaction.guild_id if interaction.guild else None
+    if not is_server_allowed(guild_id):
+        await interaction.response.send_message(
+            "❌ This bot is not configured to work in this server or in DMs.\nContact the bot owner if you believe this is a mistake.",
+            ephemeral=True
+        )
+        return False
+    return True
 
 @tasks.loop(minutes=5)
 async def check_deadlines():
@@ -194,6 +222,45 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
     print(f'{bot.user} is now online!')
+    
+    # Print server configuration status
+    if config.SERVER_MODE == "whitelist":
+        if config.ALLOWED_SERVERS:
+            print(f"Server whitelist mode: {len(config.ALLOWED_SERVERS)} server(s) allowed")
+        else:
+            print("⚠️ WARNING: Server whitelist mode is enabled but no servers are configured!")
+    else:
+        print("Global mode: Bot will work in all servers")
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Global error handler for app commands."""
+    # Check if error is due to server restriction
+    guild_id = interaction.guild_id if interaction.guild else None
+    if not is_server_allowed(guild_id):
+        try:
+            await interaction.response.send_message(
+                "❌ This bot is not configured to work in this server or in DMs.",
+                ephemeral=True
+            )
+        except:
+            pass
+        return
+    
+    # Handle other errors
+    if isinstance(error, app_commands.CommandOnCooldown):
+        await interaction.response.send_message(
+            f"⏱️ This command is on cooldown. Try again in {error.retry_after:.1f}s",
+            ephemeral=True
+        )
+    elif isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "❌ You don't have permission to use this command.",
+            ephemeral=True
+        )
+    else:
+        # Log other errors
+        print(f"Command error: {error}")
 
 # ============ REGISTRATION COMMANDS ============
 

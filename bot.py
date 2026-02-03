@@ -485,6 +485,32 @@ async def task_complete(interaction: discord.Interaction, task_id: int, proof: d
         except:
             pass
 
+@bot.tree.command(name="task_delete", description="Delete a task")
+@app_commands.describe(task_id="The ID of the task to delete")
+async def task_delete(interaction: discord.Interaction, task_id: int):
+    """Delete a task (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can delete tasks!",
+            ephemeral=True
+        )
+        return
+    
+    success = await db.delete_task(task_id, interaction.user.id)
+    if success:
+        embed = discord.Embed(
+            title="🗑️ Task Deleted",
+            description=f"Task #{task_id} has been permanently deleted.",
+            color=discord.Color.orange()
+        )
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(
+            "❌ Task not found or you don't have permission to delete it!",
+            ephemeral=True
+        )
+
 # ============ REWARD COMMANDS ============
 
 @bot.tree.command(name="reward_create", description="Create a new reward")
@@ -659,6 +685,32 @@ async def reward_assign(
     except:
         pass
 
+@bot.tree.command(name="reward_delete", description="Delete a reward")
+@app_commands.describe(reward_id="The ID of the reward to delete")
+async def reward_delete(interaction: discord.Interaction, reward_id: int):
+    """Delete a reward (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can delete rewards!",
+            ephemeral=True
+        )
+        return
+    
+    success = await db.delete_reward(reward_id, interaction.user.id)
+    if success:
+        embed = discord.Embed(
+            title="🗑️ Reward Deleted",
+            description=f"Reward #{reward_id} has been permanently deleted.",
+            color=discord.Color.orange()
+        )
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(
+            "❌ Reward not found or you don't have permission to delete it!",
+            ephemeral=True
+        )
+
 # ============ PUNISHMENT COMMANDS ============
 
 @bot.tree.command(name="punishment_create", description="Create a new punishment")
@@ -738,6 +790,32 @@ async def punishments(interaction: discord.Interaction):
         )
     
     await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="punishment_delete", description="Delete a punishment")
+@app_commands.describe(punishment_id="The ID of the punishment to delete")
+async def punishment_delete(interaction: discord.Interaction, punishment_id: int):
+    """Delete a punishment (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can delete punishments!",
+            ephemeral=True
+        )
+        return
+    
+    success = await db.delete_punishment(punishment_id, interaction.user.id)
+    if success:
+        embed = discord.Embed(
+            title="🗑️ Punishment Deleted",
+            description=f"Punishment #{punishment_id} has been permanently deleted.",
+            color=discord.Color.orange()
+        )
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(
+            "❌ Punishment not found or you don't have permission to delete it!",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="punishment_assign", description="Assign a punishment to a submissive")
 @app_commands.describe(

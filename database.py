@@ -380,6 +380,22 @@ async def reset_recurring_task(task_id: int, days_of_week: str = None, time_of_d
         
         await db.commit()
 
+async def delete_task(task_id: int, dominant_id: int) -> bool:
+    """Delete a task (dominant only)."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Verify dominant owns this task
+        async with db.execute("SELECT id FROM tasks WHERE id = ? AND dominant_id = ?", (task_id, dominant_id)) as cursor:
+            if not await cursor.fetchone():
+                return False
+        
+        # Delete associated completions first
+        await db.execute("DELETE FROM task_completions WHERE task_id = ?", (task_id,))
+        
+        # Delete task
+        await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        await db.commit()
+        return True
+
 async def get_task_stats(submissive_id: int, days: int = 7) -> Dict[str, Any]:
     """Get task completion statistics."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
@@ -429,6 +445,22 @@ async def get_rewards(dominant_id: int) -> List[Dict[str, Any]]:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+async def delete_reward(reward_id: int, dominant_id: int) -> bool:
+    """Delete a reward (dominant only)."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Verify dominant owns this reward
+        async with db.execute("SELECT id FROM rewards WHERE id = ? AND dominant_id = ?", (reward_id, dominant_id)) as cursor:
+            if not await cursor.fetchone():
+                return False
+        
+        # Delete reward assignments first
+        await db.execute("DELETE FROM assigned_rewards_punishments WHERE type = 'reward' AND item_id = ?", (reward_id,))
+        
+        # Delete reward
+        await db.execute("DELETE FROM rewards WHERE id = ?", (reward_id,))
+        await db.commit()
+        return True
+
 async def get_affordable_rewards(submissive_id: int, current_points: int) -> List[Dict[str, Any]]:
     """Get rewards the submissive can now afford but couldn't before."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
@@ -471,6 +503,22 @@ async def create_punishment(dominant_id: int, title: str, description: str) -> i
         """, (dominant_id, title, description))
         await db.commit()
         return cursor.lastrowid
+
+async def delete_punishment(punishment_id: int, dominant_id: int) -> bool:
+    """Delete a punishment (dominant only)."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Verify dominant owns this punishment
+        async with db.execute("SELECT id FROM punishments WHERE id = ? AND dominant_id = ?", (punishment_id, dominant_id)) as cursor:
+            if not await cursor.fetchone():
+                return False
+        
+        # Delete punishment assignments first
+        await db.execute("DELETE FROM assigned_rewards_punishments WHERE type = 'punishment' AND item_id = ?", (punishment_id,))
+        
+        # Delete punishment
+        await db.execute("DELETE FROM punishments WHERE id = ?", (punishment_id,))
+        await db.commit()
+        return True
 
 async def get_punishments(dominant_id: int) -> List[Dict[str, Any]]:
     """Get all punishments for a dominant."""

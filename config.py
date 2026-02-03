@@ -16,3 +16,12 @@ ALLOWED_SERVERS = [
 # If True, bot will respond to commands in DMs (direct messages)
 # If False, bot will ignore all DM commands
 ALLOW_DMS = False
+
+# Channel Notifications Configuration
+# Set channel names where the bot should post notifications
+# Set to None to disable notifications for that type
+# Bot will search for these channel names in the server where the command is used
+TASK_CHANNEL_NAME = "task"  # Channel name for new task assignments
+PUNISHMENT_CHANNEL_NAME = "punishment"  # Channel name for punishment assignments
+REWARD_CHANNEL_NAME = "reward"  # Channel name for reward redemptions
+APPROVAL_CHANNEL_NAME = "approve-or-reject"  # Channel name for approval/rejection notifications

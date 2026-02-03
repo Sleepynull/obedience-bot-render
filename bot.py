@@ -50,6 +50,26 @@ async def interaction_check(interaction: discord.Interaction) -> bool:
         return False
     return True
 
+# Helper function to post notifications to designated channels
+async def post_to_channel(guild: discord.Guild, channel_name: str, embed: discord.Embed) -> bool:
+    """Post an embed to a designated notification channel."""
+    if not channel_name or not guild:
+        return False
+    
+    # Search for channel by name (case-insensitive)
+    channel = discord.utils.get(guild.text_channels, name=channel_name.lower())
+    
+    if channel:
+        try:
+            await channel.send(embed=embed)
+            return True
+        except discord.Forbidden:
+            print(f"Missing permissions to post in #{channel_name}")
+        except Exception as e:
+            print(f"Error posting to #{channel_name}: {e}")
+    
+    return False
+
 @tasks.loop(minutes=5)
 async def check_deadlines():
     """Check for expired tasks and punishments, deduct points."""
@@ -524,7 +544,11 @@ async def task_add(
     
     await interaction.response.send_message(embed=embed)
     
-    # Notify submissive
+    # Post to task channel if configured
+    if config.TASK_CHANNEL_NAME and interaction.guild:
+        await post_to_channel(interaction.guild, config.TASK_CHANNEL_NAME, embed)
+    
+    # Notify submissive via DM
     try:
         deadline_text = f"\n⏰ **Deadline:** <t:{int(deadline.timestamp())}:R>" if deadline else ""
         await submissive.send(f"📋 **New task assigned by {interaction.user.display_name}!**\n\n**{title}**\n{description}\n\nFrequency: {frequency.value} | Points: {points}{deadline_text}")
@@ -1261,7 +1285,11 @@ async def punishment_assign(
     
     await interaction.response.send_message(embed=embed)
     
-    # Notify submissive
+    # Post to punishment channel if configured
+    if config.PUNISHMENT_CHANNEL_NAME and interaction.guild:
+        await post_to_channel(interaction.guild, config.PUNISHMENT_CHANNEL_NAME, embed)
+    
+    # Notify submissive via DM
     try:
         notif = discord.Embed(
             title="⚠️ Punishment Assigned",
@@ -1879,6 +1907,10 @@ async def approve(interaction: discord.Interaction, completion_id: int):
                 
                 await interaction.response.send_message(embed=embed)
                 
+                # Post to approval channel if configured
+                if config.APPROVAL_CHANNEL_NAME and interaction.guild:
+                    await post_to_channel(interaction.guild, config.APPROVAL_CHANNEL_NAME, embed)
+                
                 # Check for newly affordable rewards
                 affordable_rewards = await db.get_affordable_rewards(submissive_id, new_total)
                 newly_affordable = [r for r in affordable_rewards if r['point_cost'] > old_points]
@@ -1960,6 +1992,10 @@ async def reject(interaction: discord.Interaction, completion_id: int, reason: s
                 
                 await interaction.response.send_message(embed=embed)
                 
+                # Post to approval channel if configured
+                if config.APPROVAL_CHANNEL_NAME and interaction.guild:
+                    await post_to_channel(interaction.guild, config.APPROVAL_CHANNEL_NAME, embed)
+                
                 # Notify submissive
                 try:
                     sub_user = await bot.fetch_user(submissive_id)
@@ -2023,6 +2059,10 @@ async def reject_cancel(interaction: discord.Interaction, completion_id: int, re
                     embed.add_field(name="Reason", value=reason, inline=False)
                 
                 await interaction.response.send_message(embed=embed)
+                
+                # Post to approval channel if configured
+                if config.APPROVAL_CHANNEL_NAME and interaction.guild:
+                    await post_to_channel(interaction.guild, config.APPROVAL_CHANNEL_NAME, embed)
                 
                 # Notify submissive
                 try:

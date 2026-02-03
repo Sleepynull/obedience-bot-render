@@ -283,6 +283,7 @@ async def link(interaction: discord.Interaction, submissive: discord.Member):
     points="Points earned on completion (default: 10)",
     deadline_hours="Hours until deadline (optional, e.g., 24 for 1 day)",
     deadline_datetime="Specific deadline (YYYY-MM-DD HH:MM format, e.g., 2026-02-05 15:30)",
+    deadline_time="Daily deadline time only (HH:MM format, e.g., 09:00 for 9 AM daily)",
     auto_punish="Assign random punishment if deadline missed (default: False)",
     recurring="Enable auto-reset after completion",
     days_of_week="Days for weekly tasks: Mon,Wed,Fri (use Mon/Tue/Wed/Thu/Fri/Sat/Sun)",
@@ -303,6 +304,7 @@ async def task_add(
     points: int = 10,
     deadline_hours: int = None,
     deadline_datetime: str = None,
+    deadline_time: str = None,
     auto_punish: bool = False,
     recurring: bool = False,
     days_of_week: str = None,
@@ -338,7 +340,7 @@ async def task_add(
         if day_numbers:
             days_of_week_str = ','.join(day_numbers)
     
-    # Calculate deadline - prioritize specific datetime over hours
+    # Calculate deadline - prioritize specific datetime > time-only > hours
     deadline = None
     if deadline_datetime:
         try:
@@ -346,6 +348,26 @@ async def task_add(
         except ValueError:
             await interaction.response.send_message(
                 "❌ Invalid datetime format! Use: YYYY-MM-DD HH:MM (e.g., 2026-02-05 15:30)",
+                ephemeral=True
+            )
+            return
+    elif deadline_time:
+        # Parse time and calculate next occurrence of that time
+        try:
+            time_parts = deadline_time.split(':')
+            hour = int(time_parts[0])
+            minute = int(time_parts[1])
+            
+            # Get today's date with specified time
+            now = datetime.datetime.now()
+            deadline = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            
+            # If time has already passed today, set for tomorrow
+            if deadline <= now:
+                deadline = deadline + datetime.timedelta(days=1)
+        except (ValueError, IndexError):
+            await interaction.response.send_message(
+                "❌ Invalid time format! Use: HH:MM (e.g., 09:00 for 9 AM)",
                 ephemeral=True
             )
             return

@@ -4,7 +4,7 @@ A Discord bot for BDSM-themed habit tracking with tasks, rewards, punishments, a
 
 ## Features
 
-- **Roles**: Dominant and submissive user types
+- **Roles**: Dominant and submissive user types with automatic Discord role assignment
 - **Tasks**: Create daily/weekly/custom recurring tasks with point rewards and optional deadlines
 - **Advanced Scheduling**: Tasks can repeat on specific days/times (e.g., Mon/Wed/Fri at 6:00 AM)
 - **Points System**: Earn points by completing tasks, lose points for missed deadlines
@@ -68,7 +68,7 @@ A Discord bot for BDSM-themed habit tracking with tasks, rewards, punishments, a
    - Render will build and deploy your bot automatically
    - Check the "Logs" tab - you should see:
      ```
-     Synced 30 command(s)
+     Synced 31 command(s)
      <BotName>#1234 is now online!
      ```
 
@@ -81,12 +81,13 @@ A Discord bot for BDSM-themed habit tracking with tasks, rewards, punishments, a
 1. In your Discord server, type `/register`
    - Dominant users select "Dominant"
    - Submissive users select "Submissive"
+   - The bot will automatically assign you a "Dominant" or "Submissive" Discord role if it exists in your server
 
 2. Link a relationship: `/link submissive:@username`
 
 3. View all commands: `/help`
 
-### All Commands (30 Total)
+### All Commands (31 Total)
 
 #### Registration & Setup
 - `/register role:<Dominant|Submissive>` - Register with the bot
@@ -128,7 +129,8 @@ A Discord bot for BDSM-themed habit tracking with tasks, rewards, punishments, a
 - `/approve completion_id:<id>` - Approve task completion
 - `/reject completion_id:<id> [reason]` - Reject task completion
 - `/punishment_approve assignment_id:<id>` - Approve punishment completion
-- `/punishment_reject assignment_id:<id> [reason]` - Reject punishment completion
+- `/punishment_reject assignment_id:<id> [reason]` - Reject punishment (submissive must resubmit)
+- `/punishment_cancel assignment_id:<id> [reason]` - Cancel punishment (no resubmission required)
 - `/pending` - View all pending task completions
 - `/verify` - View pending punishment completions
 

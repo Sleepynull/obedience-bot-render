@@ -953,24 +953,9 @@ async def punishment_complete(interaction: discord.Interaction, assignment_id: i
     # Submit proof
     await db.submit_punishment_proof(assignment_id, proof.url)
     
-    # Check if proof should be forwarded to another user
+    # Check if there's a forward user (will be sent after approval)
     forward_user_id = await db.get_punishment_forward_user(assignment_id)
-    forwarded = False
-    if forward_user_id:
-        try:
-            forward_user = await bot.fetch_user(forward_user_id)
-            forward_embed = discord.Embed(
-                title="📸 Punishment Proof Received",
-                description=f"**{interaction.user.display_name}** completed a punishment.",
-                color=discord.Color.purple()
-            )
-            forward_embed.add_field(name="Submissive", value=interaction.user.mention, inline=True)
-            forward_embed.set_image(url=proof.url)
-            forward_embed.set_footer(text=f"Assignment ID: {assignment_id}")
-            await forward_user.send(embed=forward_embed)
-            forwarded = True
-        except:
-            pass
+    has_forward = forward_user_id is not None
     
     embed = discord.Embed(
         title="📤 Punishment Proof Submitted",
@@ -978,8 +963,8 @@ async def punishment_complete(interaction: discord.Interaction, assignment_id: i
         color=discord.Color.orange()
     )
     embed.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
-    if forwarded:
-        embed.add_field(name="📸 Image Forwarded", value="✅ Sent to designated user", inline=True)
+    if has_forward:
+        embed.add_field(name="📸 Image Forward", value="⏳ Will be sent after approval", inline=True)
     embed.set_image(url=proof.url)
     embed.set_footer(text="You'll be notified when reviewed")
     
@@ -996,8 +981,8 @@ async def punishment_complete(interaction: discord.Interaction, assignment_id: i
                 color=discord.Color.blue()
             )
             notif.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
-            if forwarded:
-                notif.add_field(name="Forwarded", value="✅ Sent to designated user", inline=True)
+            if has_forward:
+                notif.add_field(name="📸 Forward Pending", value="Will be sent after approval", inline=True)
             notif.set_image(url=proof.url)
             notif.set_footer(text=f"Use /punishment_approve {assignment_id} or /punishment_reject {assignment_id}")
             await dom_user.send(embed=notif)
@@ -1024,18 +1009,39 @@ async def punishment_approve(interaction: discord.Interaction, assignment_id: in
         )
         return
     
-    # Get assignment details
+    # Get assignment details including forward user and proof URL
     import aiosqlite
     async with aiosqlite.connect(db.DATABASE_NAME) as database:
         database.row_factory = aiosqlite.Row
         async with database.execute(
-            "SELECT submissive_id, point_penalty FROM assigned_rewards_punishments WHERE id = ?",
+            "SELECT submissive_id, point_penalty, forward_to_user_id, proof_url FROM assigned_rewards_punishments WHERE id = ?",
             (assignment_id,)
         ) as cursor:
             row = await cursor.fetchone()
             if row:
                 submissive_id = row[0]
                 penalty = row[1]
+                forward_user_id = row[2]
+                proof_url = row[3]
+                
+                # Forward image to designated user if specified (ONLY on approval)
+                forwarded = False
+                if forward_user_id and proof_url:
+                    try:
+                        forward_user = await bot.fetch_user(forward_user_id)
+                        sub_user_obj = await bot.fetch_user(submissive_id)
+                        forward_embed = discord.Embed(
+                            title="📸 Punishment Proof Received",
+                            description=f"**{sub_user_obj.display_name}** completed a punishment and it was approved.",
+                            color=discord.Color.purple()
+                        )
+                        forward_embed.add_field(name="Submissive", value=f"{sub_user_obj.display_name}", inline=True)
+                        forward_embed.set_image(url=proof_url)
+                        forward_embed.set_footer(text=f"Assignment ID: {assignment_id}")
+                        await forward_user.send(embed=forward_embed)
+                        forwarded = True
+                    except:
+                        pass
                 
                 # If it was late, refund the penalty
                 if refund_penalty > 0:
@@ -1046,6 +1052,9 @@ async def punishment_approve(interaction: discord.Interaction, assignment_id: in
                     new_total = new_total['points'] if new_total else 0
                     desc = f"Punishment #{assignment_id} approved."
                 
+                if forwarded:
+                    desc += "\n📸 **Image forwarded to designated user**"
+                
                 embed = discord.Embed(
                     title="✅ Punishment Approved",
                     description=desc,
@@ -1053,6 +1062,8 @@ async def punishment_approve(interaction: discord.Interaction, assignment_id: in
                 )
                 if refund_penalty > 0:
                     embed.add_field(name="Refunded", value=f"+{refund_penalty} points", inline=True)
+                if forwarded:
+                    embed.add_field(name="Forwarded", value="✅ Image sent", inline=True)
                 
                 await interaction.response.send_message(embed=embed)
                 
@@ -1062,6 +1073,8 @@ async def punishment_approve(interaction: discord.Interaction, assignment_id: in
                     notif_desc = f"Your punishment completion was approved!"
                     if refund_penalty > 0:
                         notif_desc += f"\n🎉 **Penalty refunded: +{refund_penalty} points!**"
+                    if forwarded:
+                        notif_desc += f"\n📸 **Your proof was forwarded**"
                     
                     notif = discord.Embed(
                         title="✅ Punishment Approved",

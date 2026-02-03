@@ -1142,6 +1142,62 @@ async def punishment_reject(interaction: discord.Interaction, assignment_id: int
                 except:
                     pass
 
+@bot.tree.command(name="punishment_cancel", description="Cancel a punishment (no resubmission required)")
+@app_commands.describe(
+    assignment_id="The punishment assignment ID",
+    reason="Reason for cancellation"
+)
+async def punishment_cancel(interaction: discord.Interaction, assignment_id: int, reason: str = None):
+    """Cancel punishment - marks as rejected but no resubmission needed (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can cancel punishments!",
+            ephemeral=True
+        )
+        return
+    
+    result = await db.approve_punishment_completion(assignment_id, interaction.user.id, False)
+    if result is None:
+        await interaction.response.send_message(
+            "❌ Punishment not found or already reviewed!",
+            ephemeral=True
+        )
+        return
+    
+    embed = discord.Embed(
+        title="❌ Punishment Cancelled",
+        description=f"Punishment #{assignment_id} has been cancelled.\nNo resubmission required.",
+        color=discord.Color.orange()
+    )
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+    
+    # Notify submissive
+    import aiosqlite
+    async with aiosqlite.connect(db.DATABASE_NAME) as database:
+        database.row_factory = aiosqlite.Row
+        async with database.execute(
+            "SELECT submissive_id FROM assigned_rewards_punishments WHERE id = ?",
+            (assignment_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                try:
+                    sub_user = await bot.fetch_user(row[0])
+                    notif = discord.Embed(
+                        title="❌ Punishment Cancelled",
+                        description="Your punishment has been cancelled by your dominant.\n✅ **No resubmission needed.**",
+                        color=discord.Color.orange()
+                    )
+                    if reason:
+                        notif.add_field(name="Reason", value=reason, inline=False)
+                    await sub_user.send(embed=notif)
+                except:
+                    pass
+
 @bot.tree.command(name="punishments_active", description="View your active punishments")
 async def punishments_active(interaction: discord.Interaction):
     """View active punishments (submissive only)."""

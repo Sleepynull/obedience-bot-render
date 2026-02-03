@@ -7,6 +7,7 @@ import database as db
 import io
 import matplotlib
 import datetime
+import pytz
 matplotlib.use('Agg')  # Non-GUI backend
 import matplotlib.pyplot as plt
 
@@ -340,26 +341,32 @@ async def task_add(
         if day_numbers:
             days_of_week_str = ','.join(day_numbers)
     
+    # Get submissive's timezone
+    sub_timezone = await db.get_user_timezone(submissive.id)
+    user_tz = pytz.timezone(sub_timezone)
+    
     # Calculate deadline - prioritize specific datetime > time-only > hours
     deadline = None
     if deadline_datetime:
         try:
-            deadline = datetime.datetime.strptime(deadline_datetime, "%Y-%m-%d %H:%M")
+            # Parse datetime and localize to user's timezone
+            naive_dt = datetime.datetime.strptime(deadline_datetime, "%Y-%m-%d %H:%M")
+            deadline = user_tz.localize(naive_dt)
         except ValueError:
             await interaction.response.send_message(
-                "❌ Invalid datetime format! Use: YYYY-MM-DD HH:MM (e.g., 2026-02-05 15:30)",
+                f"❌ Invalid datetime format! Use: YYYY-MM-DD HH:MM (e.g., 2026-02-05 15:30)\nYour timezone: {sub_timezone}",
                 ephemeral=True
             )
             return
     elif deadline_time:
-        # Parse time and calculate next occurrence of that time
+        # Parse time and calculate next occurrence of that time in user's timezone
         try:
             time_parts = deadline_time.split(':')
             hour = int(time_parts[0])
             minute = int(time_parts[1])
             
-            # Get today's date with specified time
-            now = datetime.datetime.now()
+            # Get current time in user's timezone
+            now = datetime.datetime.now(user_tz)
             deadline = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             
             # If time has already passed today, set for tomorrow
@@ -367,12 +374,14 @@ async def task_add(
                 deadline = deadline + datetime.timedelta(days=1)
         except (ValueError, IndexError):
             await interaction.response.send_message(
-                "❌ Invalid time format! Use: HH:MM (e.g., 09:00 for 9 AM)",
+                f"❌ Invalid time format! Use: HH:MM (e.g., 09:00 for 9 AM)\nYour timezone: {sub_timezone}",
                 ephemeral=True
             )
             return
     elif deadline_hours:
-        deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
+        # Calculate based on current time in user's timezone
+        now = datetime.datetime.now(user_tz)
+        deadline = now + datetime.timedelta(hours=deadline_hours)
     
     # Handle auto-punishment setup
     auto_punishment_id = None
@@ -2104,6 +2113,55 @@ async def stats(interaction: discord.Interaction, submissive: discord.Member = N
 
 # ============ UTILITY COMMANDS ============
 
+@bot.tree.command(name="timezone", description="Set your timezone for deadline calculations")
+@app_commands.describe(
+    timezone="Timezone (e.g., America/New_York, Europe/London, Asia/Tokyo, UTC)"
+)
+async def timezone(interaction: discord.Interaction, timezone: str = None):
+    """Set or view user's timezone."""
+    user = await db.get_user(interaction.user.id)
+    if not user:
+        await interaction.response.send_message(
+            "❌ You need to register first! Use `/register`",
+            ephemeral=True
+        )
+        return
+    
+    if timezone is None:
+        # Show current timezone
+        current_tz = await db.get_user_timezone(interaction.user.id)
+        tz = pytz.timezone(current_tz)
+        now = datetime.datetime.now(tz)
+        
+        embed = discord.Embed(
+            title="⏰ Your Timezone Settings",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Current Timezone", value=current_tz, inline=False)
+        embed.add_field(name="Your Current Time", value=now.strftime("%Y-%m-%d %H:%M:%S"), inline=False)
+        embed.set_footer(text="Change with: /timezone timezone:<your_timezone>\nExamples: America/New_York, Europe/London, Asia/Tokyo")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    else:
+        # Set new timezone
+        success = await db.set_user_timezone(interaction.user.id, timezone)
+        if success:
+            tz = pytz.timezone(timezone)
+            now = datetime.datetime.now(tz)
+            
+            embed = discord.Embed(
+                title="✅ Timezone Updated",
+                description=f"Your timezone has been set to **{timezone}**",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Your Current Time", value=now.strftime("%Y-%m-%d %H:%M:%S"), inline=False)
+            embed.set_footer(text="All deadlines will now be calculated in your timezone")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                f"❌ Invalid timezone: '{timezone}'\n\nExamples of valid timezones:\n• America/New_York (EST/EDT)\n• America/Los_Angeles (PST/PDT)\n• Europe/London (GMT/BST)\n• Europe/Paris (CET/CEST)\n• Asia/Tokyo (JST)\n• UTC\n\nSee full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
+                ephemeral=True
+            )
+
 @bot.tree.command(name="help", description="Show all available commands")
 async def help_command(interaction: discord.Interaction):
     """Show help."""
@@ -2146,6 +2204,12 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="📊 Stats & Points",
         value="`/points` - Check points balance\n`/stats` - View completion statistics",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="⏰ Settings",
+        value="`/timezone` - Set your timezone for deadline calculations",
         inline=False
     )
     

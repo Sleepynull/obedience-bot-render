@@ -1,5 +1,6 @@
 import aiosqlite
 import datetime
+import pytz
 from typing import Optional, List, Dict, Any
 
 DATABASE_NAME = "obedience.db"
@@ -14,9 +15,17 @@ async def init_db():
                 username TEXT NOT NULL,
                 role TEXT NOT NULL CHECK(role IN ('dominant', 'submissive')),
                 points INTEGER DEFAULT 0,
+                timezone TEXT DEFAULT 'UTC',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Add timezone column if it doesn't exist (migration)
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT 'UTC'")
+            await db.commit()
+        except:
+            pass  # Column already exists
         
         # Relationships table - maps dominants to submissives
         await db.execute("""
@@ -180,6 +189,34 @@ async def update_points(user_id: int, points_delta: int) -> int:
         async with db.execute("SELECT points FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else 0
+
+async def set_user_timezone(user_id: int, timezone: str) -> bool:
+    """Set user's timezone preference."""
+    # Validate timezone
+    try:
+        pytz.timezone(timezone)
+    except pytz.UnknownTimeZoneError:
+        return False
+    
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        await db.execute(
+            "UPDATE users SET timezone = ? WHERE user_id = ?",
+            (timezone, user_id)
+        )
+        await db.commit()
+    return True
+
+async def get_user_timezone(user_id: int) -> str:
+    """Get user's timezone preference, defaults to UTC."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        async with db.execute("SELECT timezone FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else 'UTC'
+
+def get_user_time_now(timezone_str: str = 'UTC') -> datetime.datetime:
+    """Get current time in user's timezone."""
+    tz = pytz.timezone(timezone_str)
+    return datetime.datetime.now(tz)
 
 # Relationship operations
 async def create_relationship(dominant_id: int, submissive_id: int) -> bool:

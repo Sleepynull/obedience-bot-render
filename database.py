@@ -33,6 +33,13 @@ async def init_db():
         except:
             pass  # Column already exists
         
+        # Add deadline_time column to tasks if it doesn't exist (migration)
+        try:
+            await db.execute("ALTER TABLE tasks ADD COLUMN deadline_time TEXT")
+            await db.commit()
+        except:
+            pass  # Column already exists
+        
         # Relationships table - maps dominants to submissives
         await db.execute("""
             CREATE TABLE IF NOT EXISTS relationships (
@@ -57,6 +64,7 @@ async def init_db():
                 frequency TEXT NOT NULL CHECK(frequency IN ('daily', 'weekly', 'custom')),
                 point_value INTEGER DEFAULT 10,
                 deadline TIMESTAMP,
+                deadline_time TEXT,
                 recurrence_enabled INTEGER DEFAULT 0,
                 recurrence_interval_hours INTEGER,
                 days_of_week TEXT,
@@ -278,7 +286,8 @@ async def get_dominants(submissive_id: int) -> List[Dict[str, Any]]:
 async def create_task(submissive_id: int, dominant_id: int, title: str, 
                      description: str, frequency: str, point_value: int, deadline: datetime.datetime = None,
                      recurrence_enabled: bool = False, recurrence_interval_hours: int = None,
-                     days_of_week: str = None, time_of_day: str = None, auto_punishment_id: int = None) -> int:
+                     days_of_week: str = None, time_of_day: str = None, auto_punishment_id: int = None,
+                     deadline_time: str = None) -> int:
     """Create a new task with optional recurring schedule and auto-punishment."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
         # Calculate next occurrence if recurring
@@ -288,11 +297,11 @@ async def create_task(submissive_id: int, dominant_id: int, title: str,
         
         cursor = await db.execute("""
             INSERT INTO tasks (
-                submissive_id, dominant_id, title, description, frequency, point_value, deadline,
+                submissive_id, dominant_id, title, description, frequency, point_value, deadline, deadline_time,
                 recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence, auto_punishment_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (submissive_id, dominant_id, title, description, frequency, point_value, deadline,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (submissive_id, dominant_id, title, description, frequency, point_value, deadline, deadline_time,
               recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence, auto_punishment_id))
         await db.commit()
         return cursor.lastrowid
@@ -354,17 +363,22 @@ async def submit_task_completion(task_id: int, submissive_id: int, proof_url: st
         await db.commit()
         return cursor.lastrowid
 
-async def approve_task_completion(completion_id: int, reviewer_id: int, approved: bool) -> Optional[int]:
+async def approve_task_completion(completion_id: int, reviewer_id: int, approved: bool, 
+                                  reset_deadline_on_reject: bool = False) -> Optional[int]:
     """Approve or reject a task completion. Returns points if approved."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
-        # Get completion info
+        # Get completion info and associated task
         async with db.execute("""
-            SELECT submissive_id, points_earned, approval_status FROM task_completions WHERE id = ?
+            SELECT tc.submissive_id, tc.points_earned, tc.approval_status, tc.task_id,
+                   t.deadline_time, t.submissive_id as task_submissive_id
+            FROM task_completions tc
+            JOIN tasks t ON tc.task_id = t.id
+            WHERE tc.id = ?
         """, (completion_id,)) as cursor:
             row = await cursor.fetchone()
             if not row or row[2] != 'pending':
                 return None
-            submissive_id, points, _ = row
+            submissive_id, points, _, task_id, deadline_time, task_submissive_id = row
         
         status = 'approved' if approved else 'rejected'
         
@@ -375,8 +389,91 @@ async def approve_task_completion(completion_id: int, reviewer_id: int, approved
             WHERE id = ?
         """, (status, reviewer_id, completion_id))
         
+        # Handle deadline reset for both approval and reject_cancel
+        should_reset_deadline = (approved or reset_deadline_on_reject) and deadline_time
+        
+        if should_reset_deadline:
+            # Get submissive's timezone
+            sub_timezone = await get_user_timezone(task_submissive_id)
+            user_tz = pytz.timezone(sub_timezone)
+            
+            # Calculate next deadline
+            try:
+                time_parts = deadline_time.split(':')
+                hour = int(time_parts[0])
+                minute = int(time_parts[1])
+                
+                # Get current time in user's timezone
+                now = datetime.datetime.now(user_tz)
+                new_deadline = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                
+                # If time has already passed today, set for tomorrow
+                if new_deadline <= now:
+                    new_deadline = new_deadline + datetime.timedelta(days=1)
+                
+                # Reset deadline and reactivate task
+                await db.execute("""
+                    UPDATE tasks 
+                    SET deadline = ?, active = 1
+                    WHERE id = ?
+                """, (new_deadline, task_id))
+            except (ValueError, IndexError):
+                # If there's an issue parsing deadline_time, just continue without resetting
+                pass
+        
         await db.commit()
         return points if approved else 0
+
+async def assign_punishment_for_rejected_task(task_id: int, submissive_id: int, dominant_id: int) -> Optional[int]:
+    """Assign punishment when task is rejected. Uses auto_punishment_id if set, otherwise random."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Get task's auto_punishment_id
+        async with db.execute(
+            "SELECT auto_punishment_id FROM tasks WHERE id = ?",
+            (task_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            auto_punishment_id = row[0]
+        
+        # Determine which punishment to assign
+        punishment_id = None
+        if auto_punishment_id and auto_punishment_id != -1:
+            # Use the specific linked punishment
+            punishment_id = auto_punishment_id
+        elif auto_punishment_id == -1:
+            # Random punishment flag
+            random_punishment = await get_random_punishment(dominant_id)
+            if random_punishment:
+                punishment_id = random_punishment['id']
+        else:
+            # No auto_punishment configured, use random
+            random_punishment = await get_random_punishment(dominant_id)
+            if random_punishment:
+                punishment_id = random_punishment['id']
+        
+        if not punishment_id:
+            return None
+        
+        # Get submissive's timezone for deadline calculation
+        sub_timezone = await get_user_timezone(submissive_id)
+        user_tz = pytz.timezone(sub_timezone)
+        
+        # Set punishment deadline to 24 hours from now in user's timezone
+        deadline = datetime.datetime.now(user_tz) + datetime.timedelta(hours=24)
+        
+        # Assign punishment
+        assignment_id = await assign_punishment(
+            submissive_id,
+            dominant_id,
+            punishment_id,
+            reason="Task submission rejected",
+            deadline=deadline,
+            point_penalty=10
+        )
+        
+        return assignment_id
 
 async def get_pending_completions(dominant_id: int) -> List[Dict[str, Any]]:
     """Get all pending task completions for a dominant's submissives."""

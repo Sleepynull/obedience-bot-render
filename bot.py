@@ -417,7 +417,8 @@ async def task_add(
         interval_hours,
         days_of_week_str,
         time_of_day,
-        auto_punishment_id
+        auto_punishment_id,
+        deadline_time  # Store the deadline_time for automatic reset on approval
     )
     
     embed = discord.Embed(
@@ -1845,13 +1846,13 @@ async def approve(interaction: discord.Interaction, completion_id: int):
                 except:
                     pass
 
-@bot.tree.command(name="reject", description="Reject a pending task completion")
+@bot.tree.command(name="reject", description="Reject a pending task completion (deadline stays the same)")
 @app_commands.describe(
     completion_id="The completion ID to reject",
     reason="Reason for rejection (optional)"
 )
 async def reject(interaction: discord.Interaction, completion_id: int, reason: str = None):
-    """Reject a task completion (dominant only)."""
+    """Reject a task completion - deadline remains the same (dominant only)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
         await interaction.response.send_message(
@@ -1883,7 +1884,7 @@ async def reject(interaction: discord.Interaction, completion_id: int, reason: s
                 
                 embed = discord.Embed(
                     title="❌ Task Rejected",
-                    description=f"Task completion #{completion_id} has been rejected.",
+                    description=f"Task completion #{completion_id} has been rejected.\n⏰ **Deadline remains the same.**",
                     color=discord.Color.red()
                 )
                 embed.add_field(name="Task ID", value=str(task_id), inline=True)
@@ -1903,6 +1904,71 @@ async def reject(interaction: discord.Interaction, completion_id: int, reason: s
                     notif.add_field(name="Task ID", value=str(task_id), inline=True)
                     if reason:
                         notif.add_field(name="Reason", value=reason, inline=False)
+                    notif.set_footer(text="⏰ Deadline remains the same. Submit again!")
+                    await sub_user.send(embed=notif)
+                except:
+                    pass
+
+@bot.tree.command(name="reject_cancel", description="Reject task and reset deadline to next occurrence")
+@app_commands.describe(
+    completion_id="The completion ID to reject",
+    reason="Reason for cancellation (optional)"
+)
+async def reject_cancel(interaction: discord.Interaction, completion_id: int, reason: str = None):
+    """Reject task completion and reset deadline to next occurrence (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can reject task completions!",
+            ephemeral=True
+        )
+        return
+    
+    # Reject and reset deadline
+    points = await db.approve_task_completion(completion_id, interaction.user.id, False, reset_deadline_on_reject=True)
+    if points is None:
+        await interaction.response.send_message(
+            "❌ Completion not found or already reviewed!",
+            ephemeral=True
+        )
+        return
+    
+    # Get completion details to notify submissive
+    import aiosqlite
+    async with aiosqlite.connect(db.DATABASE_NAME) as database:
+        database.row_factory = aiosqlite.Row
+        async with database.execute(
+            "SELECT submissive_id, task_id FROM task_completions WHERE id = ?",
+            (completion_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                submissive_id = row[0]
+                task_id = row[1]
+                
+                embed = discord.Embed(
+                    title="❌ Task Rejected & Reset",
+                    description=f"Task completion #{completion_id} rejected.\n🔄 **Deadline reset to next occurrence.**",
+                    color=discord.Color.orange()
+                )
+                embed.add_field(name="Task ID", value=str(task_id), inline=True)
+                if reason:
+                    embed.add_field(name="Reason", value=reason, inline=False)
+                
+                await interaction.response.send_message(embed=embed)
+                
+                # Notify submissive
+                try:
+                    sub_user = await bot.fetch_user(submissive_id)
+                    notif = discord.Embed(
+                        title="❌ Task Rejected & Reset",
+                        description=f"Your task was rejected by {interaction.user.display_name}.",
+                        color=discord.Color.orange()
+                    )
+                    notif.add_field(name="Task ID", value=str(task_id), inline=True)
+                    if reason:
+                        notif.add_field(name="Reason", value=reason, inline=False)
+                    notif.set_footer(text="🔄 Deadline has been reset to next occurrence.")
                     await sub_user.send(embed=notif)
                 except:
                     pass

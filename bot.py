@@ -54,6 +54,7 @@ async def interaction_check(interaction: discord.Interaction) -> bool:
 async def post_to_channel(guild: discord.Guild, channel_name: str, embed: discord.Embed) -> bool:
     """Post an embed to a designated notification channel."""
     if not channel_name or not guild:
+        print(f"[CHANNEL] Skipped: channel_name={channel_name}, guild={guild}")
         return False
     
     # Search for channel by name (case-insensitive)
@@ -62,11 +63,14 @@ async def post_to_channel(guild: discord.Guild, channel_name: str, embed: discor
     if channel:
         try:
             await channel.send(embed=embed)
+            print(f"[CHANNEL] Posted to #{channel_name} in {guild.name}")
             return True
         except discord.Forbidden:
-            print(f"Missing permissions to post in #{channel_name}")
+            print(f"[CHANNEL] Missing permissions to post in #{channel_name}")
         except Exception as e:
-            print(f"Error posting to #{channel_name}: {e}")
+            print(f"[CHANNEL] Error posting to #{channel_name}: {e}")
+    else:
+        print(f"[CHANNEL] Channel '#{channel_name}' not found in {guild.name}. Available channels: {[c.name for c in guild.text_channels]}")
     
     return False
 
@@ -1305,8 +1309,11 @@ async def punishment_assign(
             notif.add_field(name="📸 Image Forward", value=f"⚠️ Your proof will be sent to {forward_to.display_name}", inline=False)
         notif.set_footer(text=f"Submit proof with: /punishment_complete {assignment_id} proof:<image>")
         await submissive.send(embed=notif)
-    except:
-        pass
+        print(f"[DM] Sent punishment notification to {submissive.display_name}")
+    except discord.Forbidden:
+        print(f"[DM] User {submissive.display_name} has DMs disabled")
+    except Exception as e:
+        print(f"[DM] Failed to send DM to {submissive.display_name}: {e}")
 
 @bot.tree.command(name="punishment_complete", description="Submit proof of punishment completion")
 @app_commands.describe(
@@ -1578,6 +1585,77 @@ async def punishment_cancel(interaction: discord.Interaction, assignment_id: int
                     await sub_user.send(embed=notif)
                 except:
                     pass
+
+@bot.tree.command(name="punishment_remind", description="Send a reminder to submissive about active punishment")
+@app_commands.describe(
+    assignment_id="The punishment assignment ID to remind about"
+)
+async def punishment_remind(interaction: discord.Interaction, assignment_id: int):
+    """Send a reminder DM to submissive about their punishment (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can send reminders!",
+            ephemeral=True
+        )
+        return
+    
+    # Get punishment assignment details
+    import aiosqlite
+    async with aiosqlite.connect(db.DATABASE_NAME) as database:
+        database.row_factory = aiosqlite.Row
+        async with database.execute("""
+            SELECT ap.*, p.title, p.description
+            FROM assigned_rewards_punishments ap
+            JOIN punishments p ON ap.item_id = p.id
+            WHERE ap.id = ? AND ap.type = 'punishment' AND ap.dominant_id = ? AND ap.completion_status = 'pending'
+        """, (assignment_id, interaction.user.id)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                await interaction.response.send_message(
+                    "❌ Punishment assignment not found, already completed, or you don't own it!",
+                    ephemeral=True
+                )
+                return
+            
+            assignment = dict(row)
+    
+    # Send reminder to submissive
+    try:
+        sub_user = await bot.fetch_user(assignment['submissive_id'])
+        
+        deadline_ts = int(datetime.datetime.fromisoformat(assignment['deadline']).timestamp()) if assignment['deadline'] else 0
+        
+        reminder = discord.Embed(
+            title="⏰ Punishment Reminder",
+            description=f"🔔 **Reminder from {interaction.user.display_name}**\n\nYou have a pending punishment:\n\n**{assignment['title']}**\n{assignment['description']}",
+            color=discord.Color.orange()
+        )
+        reminder.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
+        if deadline_ts > 0:
+            reminder.add_field(name="Deadline", value=f"<t:{deadline_ts}:R>", inline=True)
+        reminder.add_field(name="Point Penalty", value=f"-{assignment['point_penalty']} points (doubles if late!)", inline=True)
+        if assignment['reason']:
+            reminder.add_field(name="Reason", value=assignment['reason'], inline=False)
+        reminder.set_footer(text=f"Submit proof with: /punishment_complete {assignment_id} proof:<image>")
+        
+        await sub_user.send(embed=reminder)
+        
+        # Confirm to dominant
+        await interaction.response.send_message(
+            f"✅ Reminder sent to <@{assignment['submissive_id']}>!",
+            ephemeral=True
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ Could not send reminder - user has DMs disabled.",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.response.send_message(
+            f"❌ Failed to send reminder: {str(e)}",
+            ephemeral=True
+        )
 
 @bot.tree.command(name="punishments_active", description="View your active punishments")
 async def punishments_active(interaction: discord.Interaction):

@@ -205,6 +205,9 @@ async def on_ready():
 ])
 async def register(interaction: discord.Interaction, role: app_commands.Choice[str]):
     """Register a user with their role."""
+    # Defer response to prevent timeout
+    await interaction.response.defer(ephemeral=True)
+    
     success = await db.register_user(interaction.user.id, str(interaction.user), role.value)
     if success:
         # Try to assign Discord role
@@ -217,8 +220,12 @@ async def register(interaction: discord.Interaction, role: app_commands.Choice[s
                     name=role.value.capitalize()
                 )
                 
-                if discord_role:
+                # Only assign if role exists and user doesn't already have it
+                if discord_role and discord_role not in interaction.user.roles:
                     await interaction.user.add_roles(discord_role)
+                    role_assigned = True
+                elif discord_role:
+                    # User already has the role
                     role_assigned = True
             except discord.Forbidden:
                 pass  # Bot doesn't have permission to manage roles
@@ -231,9 +238,9 @@ async def register(interaction: discord.Interaction, role: app_commands.Choice[s
         elif interaction.guild and not role_assigned:
             response += f"\n⚠️ Note: Create a '{role.value.capitalize()}' role in server settings for automatic role assignment."
         
-        await interaction.response.send_message(response, ephemeral=True)
+        await interaction.followup.send(response, ephemeral=True)
     else:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "❌ You're already registered!",
             ephemeral=True
         )

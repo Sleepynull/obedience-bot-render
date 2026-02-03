@@ -41,6 +41,7 @@ async def init_db():
                 description TEXT,
                 frequency TEXT NOT NULL CHECK(frequency IN ('daily', 'weekly')),
                 point_value INTEGER DEFAULT 10,
+                deadline TIMESTAMP,
                 auto_reward_id INTEGER,
                 auto_punishment_id INTEGER,
                 active INTEGER DEFAULT 1,
@@ -58,10 +59,16 @@ async def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id INTEGER NOT NULL,
                 submissive_id INTEGER NOT NULL,
-                completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                proof_url TEXT,
+                submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
                 points_earned INTEGER NOT NULL,
+                approval_status TEXT DEFAULT 'pending' CHECK(approval_status IN ('pending', 'approved', 'rejected')),
+                reviewed_by INTEGER,
+                reviewed_at TIMESTAMP,
                 FOREIGN KEY (task_id) REFERENCES tasks(id),
-                FOREIGN KEY (submissive_id) REFERENCES users(user_id)
+                FOREIGN KEY (submissive_id) REFERENCES users(user_id),
+                FOREIGN KEY (reviewed_by) REFERENCES users(user_id)
             )
         """)
         
@@ -182,13 +189,13 @@ async def get_dominant(submissive_id: int) -> Optional[Dict[str, Any]]:
 
 # Task operations
 async def create_task(submissive_id: int, dominant_id: int, title: str, 
-                     description: str, frequency: str, point_value: int) -> int:
+                     description: str, frequency: str, point_value: int, deadline: datetime.datetime = None) -> int:
     """Create a new task."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
         cursor = await db.execute("""
-            INSERT INTO tasks (submissive_id, dominant_id, title, description, frequency, point_value)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (submissive_id, dominant_id, title, description, frequency, point_value))
+            INSERT INTO tasks (submissive_id, dominant_id, title, description, frequency, point_value, deadline)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (submissive_id, dominant_id, title, description, frequency, point_value, deadline))
         await db.commit()
         return cursor.lastrowid
 
@@ -203,8 +210,8 @@ async def get_tasks(submissive_id: int, active_only: bool = True) -> List[Dict[s
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-async def complete_task(task_id: int, submissive_id: int) -> Optional[int]:
-    """Mark a task as completed and return points earned."""
+async def submit_task_completion(task_id: int, submissive_id: int, proof_url: str = None) -> Optional[int]:
+    """Submit a task completion for approval and return completion ID."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
         # Get task info
         async with db.execute("SELECT point_value FROM tasks WHERE id = ? AND active = 1", (task_id,)) as cursor:
@@ -213,14 +220,78 @@ async def complete_task(task_id: int, submissive_id: int) -> Optional[int]:
                 return None
             points = row[0]
         
-        # Record completion
-        await db.execute("""
-            INSERT INTO task_completions (task_id, submissive_id, points_earned)
-            VALUES (?, ?, ?)
-        """, (task_id, submissive_id, points))
+        # Record pending completion
+        cursor = await db.execute("""
+            INSERT INTO task_completions (task_id, submissive_id, proof_url, points_earned, approval_status)
+            VALUES (?, ?, ?, ?, 'pending')
+        """, (task_id, submissive_id, proof_url, points))
         
         await db.commit()
-        return points
+        return cursor.lastrowid
+
+async def approve_task_completion(completion_id: int, reviewer_id: int, approved: bool) -> Optional[int]:
+    """Approve or reject a task completion. Returns points if approved."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Get completion info
+        async with db.execute("""
+            SELECT submissive_id, points_earned, approval_status FROM task_completions WHERE id = ?
+        """, (completion_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row or row[2] != 'pending':
+                return None
+            submissive_id, points, _ = row
+        
+        status = 'approved' if approved else 'rejected'
+        
+        # Update completion
+        await db.execute("""
+            UPDATE task_completions 
+            SET approval_status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (status, reviewer_id, completion_id))
+        
+        await db.commit()
+        return points if approved else 0
+
+async def get_pending_completions(dominant_id: int) -> List[Dict[str, Any]]:
+    """Get all pending task completions for a dominant's submissives."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT tc.*, t.title, t.dominant_id, u.username as submissive_name
+            FROM task_completions tc
+            JOIN tasks t ON tc.task_id = t.id
+            JOIN users u ON tc.submissive_id = u.user_id
+            WHERE t.dominant_id = ? AND tc.approval_status = 'pending'
+            ORDER BY tc.submitted_at ASC
+        """, (dominant_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def get_expired_tasks() -> List[Dict[str, Any]]:
+    """Get all tasks that have passed their deadline without completion."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT t.* FROM tasks t
+            WHERE t.active = 1 
+            AND t.deadline IS NOT NULL 
+            AND t.deadline < CURRENT_TIMESTAMP
+            AND NOT EXISTS (
+                SELECT 1 FROM task_completions tc 
+                WHERE tc.task_id = t.id 
+                AND tc.approval_status = 'approved'
+                AND tc.completed_at >= t.created_at
+            )
+        """) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def deactivate_expired_task(task_id: int):
+    """Mark a task as inactive after deadline expires."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        await db.execute("UPDATE tasks SET active = 0 WHERE id = ?", (task_id,))
+        await db.commit()
 
 async def get_task_stats(submissive_id: int, days: int = 7) -> Dict[str, Any]:
     """Get task completion statistics."""

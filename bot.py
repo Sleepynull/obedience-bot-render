@@ -1,11 +1,12 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import os
 from dotenv import load_dotenv
 import database as db
 import io
 import matplotlib
+import datetime
 matplotlib.use('Agg')  # Non-GUI backend
 import matplotlib.pyplot as plt
 
@@ -20,10 +21,52 @@ intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+@tasks.loop(minutes=5)
+async def check_deadlines():
+    """Check for expired tasks and deduct points."""
+    expired_tasks = await db.get_expired_tasks()
+    
+    for task in expired_tasks:
+        # Deduct points
+        points_to_deduct = task['point_value']
+        new_total = await db.update_points(task['submissive_id'], -points_to_deduct)
+        
+        # Deactivate task
+        await db.deactivate_expired_task(task['id'])
+        
+        # Notify submissive
+        try:
+            sub_user = await bot.fetch_user(task['submissive_id'])
+            embed = discord.Embed(
+                title="⏰ Task Deadline Missed",
+                description=f"You missed the deadline for: **{task['title']}**",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Points Deducted", value=str(points_to_deduct), inline=True)
+            embed.add_field(name="New Total", value=str(new_total), inline=True)
+            await sub_user.send(embed=embed)
+        except:
+            pass
+        
+        # Notify dominant
+        try:
+            dom_user = await bot.fetch_user(task['dominant_id'])
+            embed = discord.Embed(
+                title="⏰ Task Deadline Expired",
+                description=f"Task **{task['title']}** expired without completion.",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="Submissive ID", value=str(task['submissive_id']), inline=True)
+            embed.add_field(name="Points Deducted", value=str(points_to_deduct), inline=True)
+            await dom_user.send(embed=embed)
+        except:
+            pass
+
 @bot.event
 async def on_ready():
     """Initialize bot when ready."""
     await db.init_db()
+    check_deadlines.start()  # Start deadline checker
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s)")
@@ -96,7 +139,8 @@ async def link(interaction: discord.Interaction, submissive: discord.Member):
     title="Task title",
     description="Task description",
     frequency="How often: daily or weekly",
-    points="Points earned on completion (default: 10)"
+    points="Points earned on completion (default: 10)",
+    deadline_hours="Hours until deadline (optional, e.g., 24 for 1 day)"
 )
 @app_commands.choices(frequency=[
     app_commands.Choice(name="Daily", value="daily"),
@@ -108,7 +152,8 @@ async def task_add(
     title: str,
     description: str,
     frequency: app_commands.Choice[str],
-    points: int = 10
+    points: int = 10,
+    deadline_hours: int = None
 ):
     """Add a new task (dominant only)."""
     # Verify dominant
@@ -129,6 +174,11 @@ async def task_add(
         )
         return
     
+    # Calculate deadline
+    deadline = None
+    if deadline_hours:
+        deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
+    
     # Create task
     task_id = await db.create_task(
         submissive.id,
@@ -136,7 +186,8 @@ async def task_add(
         title,
         description,
         frequency.value,
-        points
+        points,
+        deadline
     )
     
     embed = discord.Embed(
@@ -148,13 +199,16 @@ async def task_add(
     embed.add_field(name="Description", value=description, inline=False)
     embed.add_field(name="Frequency", value=frequency.value.capitalize(), inline=True)
     embed.add_field(name="Points", value=str(points), inline=True)
+    if deadline:
+        embed.add_field(name="Deadline", value=f"<t:{int(deadline.timestamp())}:R>", inline=False)
     embed.set_footer(text=f"Task ID: {task_id}")
     
     await interaction.response.send_message(embed=embed)
     
     # Notify submissive
     try:
-        await submissive.send(f"📋 **New task assigned by {interaction.user.display_name}!**\n\n**{title}**\n{description}\n\nFrequency: {frequency.value} | Points: {points}")
+        deadline_text = f"\n⏰ **Deadline:** <t:{int(deadline.timestamp())}:R>" if deadline else ""
+        await submissive.send(f"📋 **New task assigned by {interaction.user.display_name}!**\n\n**{title}**\n{description}\n\nFrequency: {frequency.value} | Points: {points}{deadline_text}")
     except:
         pass  # User has DMs disabled
 
@@ -226,10 +280,13 @@ async def tasks(interaction: discord.Interaction, submissive: discord.Member = N
     
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="task_complete", description="Mark a task as completed")
-@app_commands.describe(task_id="The ID of the task to complete")
-async def task_complete(interaction: discord.Interaction, task_id: int):
-    """Complete a task (submissive only)."""
+@bot.tree.command(name="task_complete", description="Submit a task completion with proof")
+@app_commands.describe(
+    task_id="The ID of the task to complete",
+    proof="Image proof of task completion (required for submissives)"
+)
+async def task_complete(interaction: discord.Interaction, task_id: int, proof: discord.Attachment = None):
+    """Submit task completion for approval (submissives must provide proof)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'submissive':
         await interaction.response.send_message(
@@ -238,23 +295,40 @@ async def task_complete(interaction: discord.Interaction, task_id: int):
         )
         return
     
-    points_earned = await db.complete_task(task_id, interaction.user.id)
-    if points_earned is None:
+    # Require proof for submissives
+    if not proof:
         await interaction.response.send_message(
-            "❌ Task not found or already completed!",
+            "❌ You must attach image proof to complete this task!\nUse: `/task_complete task_id:<id> proof:<attach image>`",
             ephemeral=True
         )
         return
     
-    # Update points
-    new_total = await db.update_points(interaction.user.id, points_earned)
+    # Validate it's an image
+    if not proof.content_type or not proof.content_type.startswith('image/'):
+        await interaction.response.send_message(
+            "❌ Proof must be an image file!",
+            ephemeral=True
+        )
+        return
+    
+    # Submit for approval
+    completion_id = await db.submit_task_completion(task_id, interaction.user.id, proof.url)
+    if completion_id is None:
+        await interaction.response.send_message(
+            "❌ Task not found or already submitted!",
+            ephemeral=True
+        )
+        return
     
     embed = discord.Embed(
-        title="✅ Task Completed!",
-        description=f"Great work! You earned **{points_earned}** points!",
-        color=discord.Color.green()
+        title="📤 Task Submitted for Approval",
+        description="Your task completion has been submitted to your dominant for review.",
+        color=discord.Color.orange()
     )
-    embed.add_field(name="Total Points", value=str(new_total))
+    embed.add_field(name="Task ID", value=str(task_id), inline=True)
+    embed.add_field(name="Completion ID", value=str(completion_id), inline=True)
+    embed.set_image(url=proof.url)
+    embed.set_footer(text="You'll be notified when it's approved or rejected")
     
     await interaction.response.send_message(embed=embed)
     
@@ -263,9 +337,16 @@ async def task_complete(interaction: discord.Interaction, task_id: int):
     if dominant:
         try:
             dom_user = await bot.fetch_user(dominant['user_id'])
-            await dom_user.send(
-                f"✅ **{interaction.user.display_name}** completed task #{task_id} and earned {points_earned} points!"
+            notif_embed = discord.Embed(
+                title="📥 Pending Task Approval",
+                description=f"**{interaction.user.display_name}** submitted a task completion.",
+                color=discord.Color.blue()
             )
+            notif_embed.add_field(name="Task ID", value=str(task_id), inline=True)
+            notif_embed.add_field(name="Completion ID", value=str(completion_id), inline=True)
+            notif_embed.set_image(url=proof.url)
+            notif_embed.set_footer(text=f"Use /approve {completion_id} or /reject {completion_id}")
+            await dom_user.send(embed=notif_embed)
         except:
             pass
 
@@ -505,6 +586,235 @@ async def punishment_assign(
     except:
         pass
 
+# ============ APPROVAL COMMANDS ============
+
+@bot.tree.command(name="approve", description="Approve a pending task completion")
+@app_commands.describe(completion_id="The completion ID to approve")
+async def approve(interaction: discord.Interaction, completion_id: int):
+    """Approve a task completion (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can approve task completions!",
+            ephemeral=True
+        )
+        return
+    
+    points = await db.approve_task_completion(completion_id, interaction.user.id, True)
+    if points is None:
+        await interaction.response.send_message(
+            "❌ Completion not found or already reviewed!",
+            ephemeral=True
+        )
+        return
+    
+    # Get completion details to notify submissive and check if task was late
+    import aiosqlite
+    async with aiosqlite.connect(db.DATABASE_NAME) as database:
+        database.row_factory = aiosqlite.Row
+        async with database.execute("""
+            SELECT tc.submissive_id, tc.task_id, t.deadline, t.active
+            FROM task_completions tc
+            JOIN tasks t ON tc.task_id = t.id
+            WHERE tc.id = ?
+        """, (completion_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                submissive_id = row[0]
+                task_id = row[1]
+                deadline = row[2]
+                was_late = row[3] == 0  # Task was deactivated due to missed deadline
+                
+                # Award points (double if it was late to refund the deduction)
+                points_to_award = points * 2 if was_late else points
+                new_total = await db.update_points(submissive_id, points_to_award)
+                
+                description = f"Task completion #{completion_id} has been approved."
+                if was_late:
+                    description += "\n⚠️ **Late submission - Points refunded!**"
+                
+                embed = discord.Embed(
+                    title="✅ Task Approved!",
+                    description=description,
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="Points Awarded", value=str(points_to_award), inline=True)
+                embed.add_field(name="Task ID", value=str(task_id), inline=True)
+                if was_late:
+                    embed.add_field(name="Note", value=f"Refunded {points} deducted points + {points} task points", inline=False)
+                
+                await interaction.response.send_message(embed=embed)
+                
+                # Notify submissive
+                try:
+                    sub_user = await bot.fetch_user(submissive_id)
+                    notif_desc = f"Your task completion has been approved by {interaction.user.display_name}!"
+                    if was_late:
+                        notif_desc += "\n🎉 **Late penalty refunded!**"
+                    
+                    notif = discord.Embed(
+                        title="🎉 Task Approved!",
+                        description=notif_desc,
+                        color=discord.Color.green()
+                    )
+                    notif.add_field(name="Points Earned", value=str(points_to_award), inline=True)
+                    notif.add_field(name="Total Points", value=str(new_total), inline=True)
+                    await sub_user.send(embed=notif)
+                except:
+                    pass
+
+@bot.tree.command(name="reject", description="Reject a pending task completion")
+@app_commands.describe(
+    completion_id="The completion ID to reject",
+    reason="Reason for rejection (optional)"
+)
+async def reject(interaction: discord.Interaction, completion_id: int, reason: str = None):
+    """Reject a task completion (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can reject task completions!",
+            ephemeral=True
+        )
+        return
+    
+    points = await db.approve_task_completion(completion_id, interaction.user.id, False)
+    if points is None:
+        await interaction.response.send_message(
+            "❌ Completion not found or already reviewed!",
+            ephemeral=True
+        )
+        return
+    
+    # Get completion details to notify submissive
+    import aiosqlite
+    async with aiosqlite.connect(db.DATABASE_NAME) as database:
+        database.row_factory = aiosqlite.Row
+        async with database.execute(
+            "SELECT submissive_id, task_id FROM task_completions WHERE id = ?",
+            (completion_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                submissive_id = row[0]
+                task_id = row[1]
+                
+                embed = discord.Embed(
+                    title="❌ Task Rejected",
+                    description=f"Task completion #{completion_id} has been rejected.",
+                    color=discord.Color.red()
+                )
+                embed.add_field(name="Task ID", value=str(task_id), inline=True)
+                if reason:
+                    embed.add_field(name="Reason", value=reason, inline=False)
+                
+                await interaction.response.send_message(embed=embed)
+                
+                # Notify submissive
+                try:
+                    sub_user = await bot.fetch_user(submissive_id)
+                    notif = discord.Embed(
+                        title="❌ Task Rejected",
+                        description=f"Your task completion was rejected by {interaction.user.display_name}.",
+                        color=discord.Color.red()
+                    )
+                    notif.add_field(name="Task ID", value=str(task_id), inline=True)
+                    if reason:
+                        notif.add_field(name="Reason", value=reason, inline=False)
+                    await sub_user.send(embed=notif)
+                except:
+                    pass
+
+@bot.tree.command(name="verify", description="Manually verify a task without proof (dominant override)")
+@app_commands.describe(
+    submissive="The submissive who completed the task",
+    task_id="The task ID to verify"
+)
+async def verify(interaction: discord.Interaction, submissive: discord.Member, task_id: int):
+    """Manually verify task completion without proof (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can verify tasks!",
+            ephemeral=True
+        )
+        return
+    
+    # Submit and immediately approve
+    completion_id = await db.submit_task_completion(task_id, submissive.id, None)
+    if completion_id is None:
+        await interaction.response.send_message(
+            "❌ Task not found!",
+            ephemeral=True
+        )
+        return
+    
+    points = await db.approve_task_completion(completion_id, interaction.user.id, True)
+    if points:
+        new_total = await db.update_points(submissive.id, points)
+        
+        embed = discord.Embed(
+            title="✅ Task Verified",
+            description=f"Task manually verified for {submissive.mention}",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Points Awarded", value=str(points), inline=True)
+        embed.add_field(name="New Total", value=str(new_total), inline=True)
+        
+        await interaction.response.send_message(embed=embed)
+        
+        # Notify submissive
+        try:
+            notif = discord.Embed(
+                title="✅ Task Verified",
+                description=f"**{interaction.user.display_name}** verified your task completion!",
+                color=discord.Color.green()
+            )
+            notif.add_field(name="Points Earned", value=str(points), inline=True)
+            notif.add_field(name="Total Points", value=str(new_total), inline=True)
+            await submissive.send(embed=notif)
+        except:
+            pass
+
+@bot.tree.command(name="pending", description="View pending task completions")
+async def pending(interaction: discord.Interaction):
+    """View pending task completions (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can view pending completions!",
+            ephemeral=True
+        )
+        return
+    
+    pending_list = await db.get_pending_completions(interaction.user.id)
+    
+    if not pending_list:
+        await interaction.response.send_message(
+            "✅ No pending task completions!",
+            ephemeral=True
+        )
+        return
+    
+    embed = discord.Embed(
+        title="📋 Pending Task Completions",
+        description=f"{len(pending_list)} task(s) awaiting review",
+        color=discord.Color.orange()
+    )
+    
+    for item in pending_list[:10]:  # Show max 10
+        value = f"**Submissive:** {item['submissive_name']}\n**Task:** {item['title']}\n**Submitted:** <t:{int(datetime.datetime.fromisoformat(item['submitted_at']).timestamp())}:R>"
+        if item['proof_url']:
+            value += f"\n[View Proof]({item['proof_url']})"
+        embed.add_field(
+            name=f"Completion ID: {item['id']}",
+            value=value,
+            inline=False
+        )
+    
+    embed.set_footer(text="Use /approve <id> or /reject <id> to review")
+    await interaction.response.send_message(embed=embed)
+
 # ============ POINTS AND STATS COMMANDS ============
 
 @bot.tree.command(name="points", description="Check your points or a submissive's points")
@@ -636,7 +946,13 @@ async def help_command(interaction: discord.Interaction):
     
     embed.add_field(
         name="📋 Tasks",
-        value="`/task_add` - Add a new task\n`/tasks` - View tasks\n`/task_complete` - Complete a task",
+        value="`/task_add` - Add a new task (with optional deadline)\n`/tasks` - View tasks\n`/task_complete` - Submit task with proof\n`/verify` - Manually verify task (dom)",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="✅ Approvals (Dominant Only)",
+        value="`/pending` - View pending completions\n`/approve` - Approve a completion\n`/reject` - Reject a completion",
         inline=False
     )
     

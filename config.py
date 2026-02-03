@@ -3,7 +3,7 @@
 # Server Mode Configuration
 # Set to "whitelist" to restrict bot to specific servers
 # Set to "global" to allow bot to work in all servers
-SERVER_MODE = "whitelist"  # Options: "whitelist" or "global"
+SERVER_MODE = "global"  # Options: "whitelist" or "global"
 
 # Whitelist of allowed server IDs (only used when SERVER_MODE = "whitelist")
 # Add your Discord server IDs here

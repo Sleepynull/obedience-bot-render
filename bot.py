@@ -918,6 +918,12 @@ async def approve(interaction: discord.Interaction, completion_id: int):
                 
                 # Award points (double if it was late to refund the deduction)
                 points_to_award = points * 2 if was_late else points
+                
+                # Get current user data to calculate old points
+                user_data = await db.get_user(submissive_id)
+                old_points = user_data['points'] if user_data else 0
+                
+                # Update points
                 new_total = await db.update_points(submissive_id, points_to_award)
                 
                 description = f"Task completion #{completion_id} has been approved."
@@ -936,6 +942,10 @@ async def approve(interaction: discord.Interaction, completion_id: int):
                 
                 await interaction.response.send_message(embed=embed)
                 
+                # Check for newly affordable rewards
+                affordable_rewards = await db.get_affordable_rewards(submissive_id, new_total)
+                newly_affordable = [r for r in affordable_rewards if r['point_cost'] > old_points]
+                
                 # Notify submissive
                 try:
                     sub_user = await bot.fetch_user(submissive_id)
@@ -950,6 +960,13 @@ async def approve(interaction: discord.Interaction, completion_id: int):
                     )
                     notif.add_field(name="Points Earned", value=str(points_to_award), inline=True)
                     notif.add_field(name="Total Points", value=str(new_total), inline=True)
+                    
+                    # Add newly affordable rewards notification
+                    if newly_affordable:
+                        rewards_text = "\n".join([f"✨ **{r['title']}** ({r['point_cost']} points)" for r in newly_affordable[:3]])
+                        notif.add_field(name="🎁 New Rewards Available!", value=rewards_text, inline=False)
+                        notif.set_footer(text="You can now afford these rewards!")
+                    
                     await sub_user.send(embed=notif)
                 except:
                     pass

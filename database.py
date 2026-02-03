@@ -350,6 +350,28 @@ async def get_rewards(dominant_id: int) -> List[Dict[str, Any]]:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+async def get_affordable_rewards(submissive_id: int, current_points: int) -> List[Dict[str, Any]]:
+    """Get rewards the submissive can now afford but couldn't before."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        # Get dominant for this submissive
+        async with db.execute("""
+            SELECT dominant_id FROM relationships WHERE submissive_id = ?
+        """, (submissive_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return []
+            dominant_id = row[0]
+        
+        # Get rewards they can afford
+        async with db.execute("""
+            SELECT * FROM rewards 
+            WHERE dominant_id = ? AND point_cost > 0 AND point_cost <= ?
+            ORDER BY point_cost ASC
+        """, (dominant_id, current_points)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
 async def assign_reward(submissive_id: int, dominant_id: int, reward_id: int, reason: str = None) -> bool:
     """Assign a reward to a submissive."""
     async with aiosqlite.connect(DATABASE_NAME) as db:

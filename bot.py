@@ -192,10 +192,31 @@ async def register(interaction: discord.Interaction, role: app_commands.Choice[s
     """Register a user with their role."""
     success = await db.register_user(interaction.user.id, str(interaction.user), role.value)
     if success:
-        await interaction.response.send_message(
-            f"✅ You've been registered as a **{role.value}**!",
-            ephemeral=True
-        )
+        # Try to assign Discord role
+        role_assigned = False
+        if interaction.guild:  # Only works if command is used in a server
+            try:
+                # Look for a role named "Dominant" or "Submissive" (case-insensitive)
+                discord_role = discord.utils.get(
+                    interaction.guild.roles,
+                    name=role.value.capitalize()
+                )
+                
+                if discord_role:
+                    await interaction.user.add_roles(discord_role)
+                    role_assigned = True
+            except discord.Forbidden:
+                pass  # Bot doesn't have permission to manage roles
+            except Exception:
+                pass  # Other error, just continue
+        
+        response = f"✅ You've been registered as a **{role.value}**!"
+        if role_assigned:
+            response += f"\n🏷️ Discord role assigned!"
+        elif interaction.guild and not role_assigned:
+            response += f"\n⚠️ Note: Create a '{role.value.capitalize()}' role in server settings for automatic role assignment."
+        
+        await interaction.response.send_message(response, ephemeral=True)
     else:
         await interaction.response.send_message(
             "❌ You're already registered!",

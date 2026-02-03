@@ -611,6 +611,79 @@ async def task_delete(interaction: discord.Interaction, task_id: int):
             ephemeral=True
         )
 
+@bot.tree.command(name="task_edit", description="Edit an existing task")
+@app_commands.describe(
+    task_id="The ID of the task to edit",
+    title="New task title (optional)",
+    description="New task description (optional)",
+    points="New point value (optional)",
+    deadline_hours="New deadline in hours (optional)",
+    deadline_datetime="New specific deadline YYYY-MM-DD HH:MM (optional)"
+)
+async def task_edit(
+    interaction: discord.Interaction,
+    task_id: int,
+    title: str = None,
+    description: str = None,
+    points: int = None,
+    deadline_hours: int = None,
+    deadline_datetime: str = None
+):
+    """Edit a task (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can edit tasks!",
+            ephemeral=True
+        )
+        return
+    
+    # Calculate new deadline if provided
+    new_deadline = None
+    if deadline_datetime:
+        try:
+            new_deadline = datetime.datetime.strptime(deadline_datetime, "%Y-%m-%d %H:%M")
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Invalid datetime format! Use: YYYY-MM-DD HH:MM (e.g., 2026-02-05 15:30)",
+                ephemeral=True
+            )
+            return
+    elif deadline_hours:
+        new_deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
+    
+    success = await db.edit_task(
+        task_id, 
+        interaction.user.id, 
+        title=title, 
+        description=description, 
+        point_value=points,
+        deadline=new_deadline
+    )
+    
+    if success:
+        embed = discord.Embed(
+            title="✏️ Task Updated",
+            description=f"Task #{task_id} has been updated.",
+            color=discord.Color.blue()
+        )
+        
+        if title:
+            embed.add_field(name="New Title", value=title, inline=False)
+        if description:
+            embed.add_field(name="New Description", value=description, inline=False)
+        if points:
+            embed.add_field(name="New Points", value=str(points), inline=True)
+        if new_deadline:
+            embed.add_field(name="New Deadline", value=f"<t:{int(new_deadline.timestamp())}:R>", inline=True)
+        
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(
+            "❌ Task not found or you don't have permission to edit it!",
+            ephemeral=True
+        )
+
 # ============ REWARD COMMANDS ============
 
 @bot.tree.command(name="reward_create", description="Create a new reward")
@@ -815,6 +888,52 @@ async def reward_delete(interaction: discord.Interaction, reward_id: int):
             ephemeral=True
         )
 
+@bot.tree.command(name="reward_edit", description="Edit an existing reward")
+@app_commands.describe(
+    reward_id="The ID of the reward to edit",
+    title="New reward title (optional)",
+    description="New reward description (optional)",
+    cost="New point cost (optional)"
+)
+async def reward_edit(
+    interaction: discord.Interaction,
+    reward_id: int,
+    title: str = None,
+    description: str = None,
+    cost: int = None
+):
+    """Edit a reward (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can edit rewards!",
+            ephemeral=True
+        )
+        return
+    
+    success = await db.edit_reward(reward_id, interaction.user.id, title=title, description=description, point_cost=cost)
+    
+    if success:
+        embed = discord.Embed(
+            title="✏️ Reward Updated",
+            description=f"Reward #{reward_id} has been updated.",
+            color=discord.Color.gold()
+        )
+        
+        if title:
+            embed.add_field(name="New Title", value=title, inline=False)
+        if description:
+            embed.add_field(name="New Description", value=description, inline=False)
+        if cost is not None:
+            embed.add_field(name="New Cost", value=f"{cost} points", inline=True)
+        
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(
+            "❌ Reward not found or you don't have permission to edit it!",
+            ephemeral=True
+        )
+
 # ============ PUNISHMENT COMMANDS ============
 
 @bot.tree.command(name="punishment_create", description="Create a new punishment")
@@ -922,6 +1041,48 @@ async def punishment_delete(interaction: discord.Interaction, punishment_id: int
     else:
         await interaction.response.send_message(
             "❌ Punishment not found or you don't have permission to delete it!",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="punishment_edit", description="Edit an existing punishment")
+@app_commands.describe(
+    punishment_id="The ID of the punishment to edit",
+    title="New punishment title (optional)",
+    description="New punishment description (optional)"
+)
+async def punishment_edit(
+    interaction: discord.Interaction,
+    punishment_id: int,
+    title: str = None,
+    description: str = None
+):
+    """Edit a punishment (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can edit punishments!",
+            ephemeral=True
+        )
+        return
+    
+    success = await db.edit_punishment(punishment_id, interaction.user.id, title=title, description=description)
+    
+    if success:
+        embed = discord.Embed(
+            title="✏️ Punishment Updated",
+            description=f"Punishment #{punishment_id} has been updated.",
+            color=discord.Color.red()
+        )
+        
+        if title:
+            embed.add_field(name="New Title", value=title, inline=False)
+        if description:
+            embed.add_field(name="New Description", value=description, inline=False)
+        
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(
+            "❌ Punishment not found or you don't have permission to edit it!",
             ephemeral=True
         )
 
@@ -1938,7 +2099,7 @@ async def help_command(interaction: discord.Interaction):
     
     embed.add_field(
         name="📋 Tasks",
-        value="`/task_add` - Add a new task (supports specific deadlines & auto-punish)\n`/tasks` - View tasks\n`/task_complete` - Submit task with proof\n`/verify` - Manually verify task (dom)",
+        value="`/task_add` - Add a new task (supports specific deadlines & auto-punish)\n`/tasks` - View tasks\n`/task_complete` - Submit task with proof\n`/task_edit` - Edit existing task (dom)\n`/task_delete` - Delete task (dom)\n`/verify` - Manually verify task (dom)",
         inline=False
     )
     
@@ -1950,13 +2111,13 @@ async def help_command(interaction: discord.Interaction):
     
     embed.add_field(
         name="🎁 Rewards",
-        value="`/reward_create` - Create a reward\n`/rewards` - View rewards\n`/reward_assign` - Give a reward",
+        value="`/reward_create` - Create a reward\n`/rewards` - View rewards\n`/reward_assign` - Give a reward\n`/reward_edit` - Edit reward (dom)\n`/reward_delete` - Delete reward (dom)",
         inline=False
     )
     
     embed.add_field(
         name="⚠️ Punishments",
-        value="`/punishment_create` - Create a punishment\n`/punishments` - View punishments\n`/punishment_assign` - Assign with specific deadline\n`/punishment_assign_random` - Assign random with deadline",
+        value="`/punishment_create` - Create a punishment\n`/punishments` - View punishments\n`/punishment_assign` - Assign with specific deadline\n`/punishment_assign_random` - Assign random with deadline\n`/punishment_edit` - Edit punishment (dom)\n`/punishment_delete` - Delete punishment (dom)",
         inline=False
     )
     

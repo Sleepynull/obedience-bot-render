@@ -426,6 +426,42 @@ async def delete_task(task_id: int, dominant_id: int) -> bool:
         await db.commit()
         return True
 
+async def edit_task(task_id: int, dominant_id: int, title: str = None, description: str = None, 
+                   point_value: int = None, deadline: datetime.datetime = None) -> bool:
+    """Edit a task (dominant only). Only updates provided fields."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Verify dominant owns this task
+        async with db.execute("SELECT id FROM tasks WHERE id = ? AND dominant_id = ?", (task_id, dominant_id)) as cursor:
+            if not await cursor.fetchone():
+                return False
+        
+        # Build update query dynamically
+        updates = []
+        params = []
+        
+        if title is not None:
+            updates.append("title = ?")
+            params.append(title)
+        if description is not None:
+            updates.append("description = ?")
+            params.append(description)
+        if point_value is not None:
+            updates.append("point_value = ?")
+            params.append(point_value)
+        if deadline is not None:
+            updates.append("deadline = ?")
+            params.append(deadline)
+        
+        if not updates:
+            return True  # Nothing to update
+        
+        params.append(task_id)
+        query = f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?"
+        
+        await db.execute(query, params)
+        await db.commit()
+        return True
+
 async def get_task_stats(submissive_id: int, days: int = 7) -> Dict[str, Any]:
     """Get task completion statistics."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
@@ -491,6 +527,39 @@ async def delete_reward(reward_id: int, dominant_id: int) -> bool:
         await db.commit()
         return True
 
+async def edit_reward(reward_id: int, dominant_id: int, title: str = None, 
+                     description: str = None, point_cost: int = None) -> bool:
+    """Edit a reward (dominant only). Only updates provided fields."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Verify dominant owns this reward
+        async with db.execute("SELECT id FROM rewards WHERE id = ? AND dominant_id = ?", (reward_id, dominant_id)) as cursor:
+            if not await cursor.fetchone():
+                return False
+        
+        # Build update query dynamically
+        updates = []
+        params = []
+        
+        if title is not None:
+            updates.append("title = ?")
+            params.append(title)
+        if description is not None:
+            updates.append("description = ?")
+            params.append(description)
+        if point_cost is not None:
+            updates.append("point_cost = ?")
+            params.append(point_cost)
+        
+        if not updates:
+            return True  # Nothing to update
+        
+        params.append(reward_id)
+        query = f"UPDATE rewards SET {', '.join(updates)} WHERE id = ?"
+        
+        await db.execute(query, params)
+        await db.commit()
+        return True
+
 async def get_affordable_rewards(submissive_id: int, current_points: int) -> List[Dict[str, Any]]:
     """Get rewards the submissive can now afford but couldn't before."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
@@ -547,6 +616,36 @@ async def delete_punishment(punishment_id: int, dominant_id: int) -> bool:
         
         # Delete punishment
         await db.execute("DELETE FROM punishments WHERE id = ?", (punishment_id,))
+        await db.commit()
+        return True
+
+async def edit_punishment(punishment_id: int, dominant_id: int, title: str = None, 
+                         description: str = None) -> bool:
+    """Edit a punishment (dominant only). Only updates provided fields."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Verify dominant owns this punishment
+        async with db.execute("SELECT id FROM punishments WHERE id = ? AND dominant_id = ?", (punishment_id, dominant_id)) as cursor:
+            if not await cursor.fetchone():
+                return False
+        
+        # Build update query dynamically
+        updates = []
+        params = []
+        
+        if title is not None:
+            updates.append("title = ?")
+            params.append(title)
+        if description is not None:
+            updates.append("description = ?")
+            params.append(description)
+        
+        if not updates:
+            return True  # Nothing to update
+        
+        params.append(punishment_id)
+        query = f"UPDATE punishments SET {', '.join(updates)} WHERE id = ?"
+        
+        await db.execute(query, params)
         await db.commit()
         return True
 

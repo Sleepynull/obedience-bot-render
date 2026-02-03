@@ -32,6 +32,36 @@ async def check_deadlines():
         points_to_deduct = task['point_value']
         new_total = await db.update_points(task['submissive_id'], -points_to_deduct)
         
+        # Check if task has linked punishment and auto-assign it
+        punishment_id = task.get('auto_punishment_id')
+        punishment_assigned = False
+        assignment_id = None
+        if punishment_id:
+            deadline = datetime.datetime.now() + datetime.timedelta(hours=24)
+            assignment_id = await db.assign_punishment(
+                task['submissive_id'], 
+                task['dominant_id'], 
+                punishment_id, 
+                f"Auto-assigned for missing task: {task['title']}", 
+                deadline, 
+                10
+            )
+            punishment_assigned = True
+        
+        # Check point thresholds
+        thresholds = await db.check_point_thresholds(task['submissive_id'], new_total)
+        for threshold in thresholds:
+            deadline = datetime.datetime.now() + datetime.timedelta(hours=24)
+            await db.assign_punishment(
+                task['submissive_id'],
+                threshold['dominant_id'],
+                threshold['punishment_id'],
+                f"Auto-assigned for dropping below {threshold['threshold_points']} points",
+                deadline,
+                10
+            )
+            await db.mark_threshold_triggered(threshold['id'])
+        
         # Deactivate task
         await db.deactivate_expired_task(task['id'])
         
@@ -45,6 +75,8 @@ async def check_deadlines():
             )
             embed.add_field(name="Points Deducted", value=str(points_to_deduct), inline=True)
             embed.add_field(name="New Total", value=str(new_total), inline=True)
+            if punishment_assigned:
+                embed.add_field(name="⚠️ Punishment Auto-Assigned", value=f"Assignment ID: {assignment_id}\nDeadline: 24 hours", inline=False)
             await sub_user.send(embed=embed)
         except:
             pass
@@ -59,6 +91,8 @@ async def check_deadlines():
             )
             embed.add_field(name="Submissive ID", value=str(task['submissive_id']), inline=True)
             embed.add_field(name="Points Deducted", value=str(points_to_deduct), inline=True)
+            if punishment_assigned:
+                embed.add_field(name="Punishment Auto-Assigned", value=f"Assignment ID: {assignment_id}", inline=True)
             await dom_user.send(embed=embed)
         except:
             pass
@@ -1101,6 +1135,211 @@ async def punishments_active(interaction: discord.Interaction):
     
     embed.set_footer(text="Submit proof with /punishment_complete <id> proof:<image>")
     await interaction.response.send_message(embed=embed)
+
+# ============ AUTO-PUNISHMENT COMMANDS ============
+
+@bot.tree.command(name="task_link_punishment", description="Link a punishment to auto-assign when task deadline is missed")
+@app_commands.describe(
+    task_id="The task ID to link",
+    punishment_id="The punishment ID to auto-assign on failure"
+)
+async def task_link_punishment(interaction: discord.Interaction, task_id: int, punishment_id: int):
+    """Link punishment to task (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can link punishments!",
+            ephemeral=True
+        )
+        return
+    
+    success = await db.link_task_punishment(task_id, punishment_id, interaction.user.id)
+    if success:
+        embed = discord.Embed(
+            title="🔗 Punishment Linked to Task",
+            description=f"Punishment #{punishment_id} will be auto-assigned if Task #{task_id} deadline is missed.",
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(
+            "❌ Task or punishment not found, or you don't own them!",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="threshold_create", description="Auto-assign punishment when points drop below threshold")
+@app_commands.describe(
+    threshold_points="Point threshold (punishment assigned when below this)",
+    punishment_id="The punishment ID to auto-assign",
+    submissive="Specific submissive (leave blank for all your submissives)"
+)
+async def threshold_create(
+    interaction: discord.Interaction,
+    threshold_points: int,
+    punishment_id: int,
+    submissive: discord.Member = None
+):
+    """Create point threshold trigger (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can create thresholds!",
+            ephemeral=True
+        )
+        return
+    
+    submissive_id = submissive.id if submissive else None
+    threshold_id = await db.create_point_threshold(
+        interaction.user.id,
+        threshold_points,
+        punishment_id,
+        submissive_id
+    )
+    
+    target = submissive.mention if submissive else "all your submissives"
+    embed = discord.Embed(
+        title="🎯 Point Threshold Created",
+        description=f"Punishment #{punishment_id} will be auto-assigned to {target} when points drop below {threshold_points}.",
+        color=discord.Color.orange()
+    )
+    embed.set_footer(text=f"Threshold ID: {threshold_id} | Triggers max once per 24 hours")
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="thresholds", description="View your point thresholds")
+async def thresholds(interaction: discord.Interaction):
+    """View point thresholds (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can view thresholds!",
+            ephemeral=True
+        )
+        return
+    
+    thresholds_list = await db.get_point_thresholds(interaction.user.id)
+    
+    if not thresholds_list:
+        await interaction.response.send_message(
+            "No thresholds set up yet!",
+            ephemeral=True
+        )
+        return
+    
+    embed = discord.Embed(
+        title="🎯 Your Point Thresholds",
+        color=discord.Color.orange()
+    )
+    
+    for t in thresholds_list:
+        target = t.get('submissive_name', 'All submissives')
+        value = f"**Target:** {target}\n**Punishment:** {t['punishment_title']}\n**Threshold:** < {t['threshold_points']} points"
+        embed.add_field(
+            name=f"ID: {t['id']}",
+            value=value,
+            inline=False
+        )
+    
+    embed.set_footer(text="Delete with: /threshold_delete <id>")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="threshold_delete", description="Delete a point threshold")
+@app_commands.describe(threshold_id="The threshold ID to delete")
+async def threshold_delete(interaction: discord.Interaction, threshold_id: int):
+    """Delete point threshold (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can delete thresholds!",
+            ephemeral=True
+        )
+        return
+    
+    success = await db.delete_point_threshold(threshold_id, interaction.user.id)
+    if success:
+        await interaction.response.send_message("✅ Threshold deleted!", ephemeral=True)
+    else:
+        await interaction.response.send_message(
+            "❌ Threshold not found or you don't own it!",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="punishment_assign_random", description="Assign a random punishment to a submissive")
+@app_commands.describe(
+    submissive="The submissive to punish",
+    reason="Reason for punishment (optional)",
+    deadline_hours="Hours to complete (default: 24)",
+    point_penalty="Points deducted if not completed (default: 10)"
+)
+async def punishment_assign_random(
+    interaction: discord.Interaction,
+    submissive: discord.Member,
+    reason: str = None,
+    deadline_hours: int = 24,
+    point_penalty: int = 10
+):
+    """Assign random punishment (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can assign punishments!",
+            ephemeral=True
+        )
+        return
+    
+    # Get random punishment
+    punishment = await db.get_random_punishment(interaction.user.id)
+    if not punishment:
+        await interaction.response.send_message(
+            "❌ No punishments available! Create some first with /punishment_create",
+            ephemeral=True
+        )
+        return
+    
+    # Calculate deadline
+    deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
+    
+    assignment_id = await db.assign_punishment(
+        submissive.id,
+        interaction.user.id,
+        punishment['id'],
+        reason or "Random punishment",
+        deadline,
+        point_penalty
+    )
+    
+    embed = discord.Embed(
+        title="🎲 Random Punishment Assigned",
+        description=f"**{punishment['title']}** assigned to {submissive.mention}",
+        color=discord.Color.purple()
+    )
+    embed.add_field(name="Description", value=punishment['description'], inline=False)
+    embed.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
+    embed.add_field(name="Deadline", value=f"<t:{int(deadline.timestamp())}:R>", inline=True)
+    embed.add_field(name="Point Penalty", value=f"{point_penalty} (doubles if late)", inline=True)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+    
+    # Notify submissive
+    try:
+        notif = discord.Embed(
+            title="🎲 Random Punishment Assigned",
+            description=f"**{interaction.user.display_name}** rolled the dice and assigned you a punishment!",
+            color=discord.Color.purple()
+        )
+        notif.add_field(name="Punishment", value=punishment['title'], inline=False)
+        notif.add_field(name="Description", value=punishment['description'], inline=False)
+        notif.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
+        notif.add_field(name="Deadline", value=f"<t:{int(deadline.timestamp())}:R>", inline=True)
+        notif.add_field(name="Point Penalty", value=f"-{point_penalty} points (doubles to -{point_penalty * 2} if late!)", inline=False)
+        if reason:
+            notif.add_field(name="Reason", value=reason, inline=False)
+        notif.set_footer(text=f"Submit proof with: /punishment_complete {assignment_id} proof:<image>")
+        await submissive.send(embed=notif)
+    except:
+        pass
 
 # ============ APPROVAL COMMANDS ============
 

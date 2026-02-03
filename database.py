@@ -103,6 +103,23 @@ async def init_db():
             )
         """)
         
+        # Point threshold triggers table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS point_thresholds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dominant_id INTEGER NOT NULL,
+                submissive_id INTEGER,
+                threshold_points INTEGER NOT NULL,
+                punishment_id INTEGER NOT NULL,
+                active INTEGER DEFAULT 1,
+                last_triggered_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (dominant_id) REFERENCES users(user_id),
+                FOREIGN KEY (submissive_id) REFERENCES users(user_id),
+                FOREIGN KEY (punishment_id) REFERENCES punishments(id)
+            )
+        """)
+        
         # Assigned rewards/punishments table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS assigned_rewards_punishments (
@@ -655,3 +672,104 @@ async def get_assigned_items(submissive_id: int, item_type: str = None) -> List[
         async with db.execute(query, params) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+# Task punishment linking
+async def link_task_punishment(task_id: int, punishment_id: int, dominant_id: int) -> bool:
+    """Link a punishment to a task (auto-assigns if task deadline missed)."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Verify dominant owns both task and punishment
+        async with db.execute("SELECT id FROM tasks WHERE id = ? AND dominant_id = ?", (task_id, dominant_id)) as cursor:
+            if not await cursor.fetchone():
+                return False
+        
+        async with db.execute("SELECT id FROM punishments WHERE id = ? AND dominant_id = ?", (punishment_id, dominant_id)) as cursor:
+            if not await cursor.fetchone():
+                return False
+        
+        # Link punishment to task
+        await db.execute("UPDATE tasks SET auto_punishment_id = ? WHERE id = ?", (punishment_id, task_id))
+        await db.commit()
+        return True
+
+async def get_task_punishment(task_id: int) -> Optional[int]:
+    """Get the linked punishment ID for a task."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        async with db.execute("SELECT auto_punishment_id FROM tasks WHERE id = ?", (task_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else None
+
+# Point threshold triggers
+async def create_point_threshold(dominant_id: int, threshold_points: int, punishment_id: int, submissive_id: int = None) -> int:
+    """Create a point threshold trigger."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        cursor = await db.execute("""
+            INSERT INTO point_thresholds (dominant_id, submissive_id, threshold_points, punishment_id)
+            VALUES (?, ?, ?, ?)
+        """, (dominant_id, submissive_id, threshold_points, punishment_id))
+        await db.commit()
+        return cursor.lastrowid
+
+async def check_point_thresholds(submissive_id: int, current_points: int) -> List[Dict[str, Any]]:
+    """Check if submissive triggered any point thresholds."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT pt.*, p.title, p.description
+            FROM point_thresholds pt
+            JOIN punishments p ON pt.punishment_id = p.id
+            WHERE pt.active = 1
+            AND (pt.submissive_id = ? OR pt.submissive_id IS NULL)
+            AND pt.threshold_points > ?
+            AND (pt.last_triggered_at IS NULL OR pt.last_triggered_at < datetime('now', '-1 day'))
+        """, (submissive_id, current_points)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def mark_threshold_triggered(threshold_id: int):
+    """Mark a threshold as triggered."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        await db.execute(
+            "UPDATE point_thresholds SET last_triggered_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (threshold_id,)
+        )
+        await db.commit()
+
+async def get_point_thresholds(dominant_id: int) -> List[Dict[str, Any]]:
+    """Get all point thresholds for a dominant."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT pt.*, p.title as punishment_title, u.username as submissive_name
+            FROM point_thresholds pt
+            JOIN punishments p ON pt.punishment_id = p.id
+            LEFT JOIN users u ON pt.submissive_id = u.user_id
+            WHERE pt.dominant_id = ? AND pt.active = 1
+            ORDER BY pt.threshold_points DESC
+        """, (dominant_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def delete_point_threshold(threshold_id: int, dominant_id: int) -> bool:
+    """Delete a point threshold."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        async with db.execute("SELECT id FROM point_thresholds WHERE id = ? AND dominant_id = ?", (threshold_id, dominant_id)) as cursor:
+            if not await cursor.fetchone():
+                return False
+        
+        await db.execute("DELETE FROM point_thresholds WHERE id = ?", (threshold_id,))
+        await db.commit()
+        return True
+
+# Random punishment assignment
+async def get_random_punishment(dominant_id: int) -> Optional[Dict[str, Any]]:
+    """Get a random punishment from available punishments."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT * FROM punishments 
+            WHERE dominant_id = ? 
+            ORDER BY RANDOM() 
+            LIMIT 1
+        """, (dominant_id,)) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None

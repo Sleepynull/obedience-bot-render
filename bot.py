@@ -1218,10 +1218,19 @@ async def points(interaction: discord.Interaction, submissive: discord.Member = 
         return
     
     embed = discord.Embed(
-        title="💎 Points Balance",
+        title="💸 Points Balance",
         description=f"{target_name} {'have' if target_name == 'You' else 'has'} **{target['points']}** points",
         color=discord.Color.purple()
     )
+    
+    # If submissive checking their own points, show affordable rewards
+    if target_name == "You" and user['role'] == 'submissive':
+        affordable_rewards = await db.get_affordable_rewards(interaction.user.id, target['points'])
+        if affordable_rewards:
+            rewards_text = "\n".join([f"✨ **{r['title']}** - {r['point_cost']} points" for r in affordable_rewards[:5]])
+            embed.add_field(name="🎁 Rewards You Can Afford", value=rewards_text, inline=False)
+        else:
+            embed.add_field(name="🎁 Rewards", value="Keep earning points to unlock rewards!", inline=False)
     
     await interaction.response.send_message(embed=embed)
 

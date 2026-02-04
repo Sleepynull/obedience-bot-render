@@ -1104,8 +1104,9 @@ async def reward_assign(
         pass
 
 @bot.tree.command(name="reward_delete", description="Delete a reward")
-@app_commands.describe(reward_id="The ID of the reward to delete")
-async def reward_delete(interaction: discord.Interaction, reward_id: int):
+@app_commands.describe(reward_name="The reward to delete")
+@app_commands.autocomplete(reward_name=reward_autocomplete)
+async def reward_delete(interaction: discord.Interaction, reward_name: str):
     """Delete a reward (dominant only)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
@@ -1115,33 +1116,43 @@ async def reward_delete(interaction: discord.Interaction, reward_id: int):
         )
         return
     
-    success = await db.delete_reward(reward_id, interaction.user.id)
+    # Look up reward by name
+    reward = await db.get_reward_by_name(interaction.user.id, reward_name)
+    if not reward:
+        await interaction.response.send_message(
+            f"❌ Reward '{reward_name}' not found!",
+            ephemeral=True
+        )
+        return
+    
+    success = await db.delete_reward(reward['id'], interaction.user.id)
     if success:
         embed = discord.Embed(
             title="🗑️ Reward Deleted",
-            description=f"Reward #{reward_id} has been permanently deleted.",
+            description=f"**{reward_name}** has been permanently deleted.",
             color=discord.Color.orange()
         )
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message(
-            "❌ Reward not found or you don't have permission to delete it!",
+            "❌ Failed to delete reward!",
             ephemeral=True
         )
 
 @bot.tree.command(name="reward_edit", description="Edit an existing reward")
 @app_commands.describe(
-    reward_id="The ID of the reward to edit",
-    title="New reward title (optional)",
-    description="New reward description (optional)",
-    cost="New point cost (optional)"
+    reward_name="The reward to edit",
+    new_title="New reward title (optional)",
+    new_description="New reward description (optional)",
+    new_cost="New point cost (optional)"
 )
+@app_commands.autocomplete(reward_name=reward_autocomplete)
 async def reward_edit(
     interaction: discord.Interaction,
-    reward_id: int,
-    title: str = None,
-    description: str = None,
-    cost: int = None
+    reward_name: str,
+    new_title: str = None,
+    new_description: str = None,
+    new_cost: int = None
 ):
     """Edit a reward (dominant only)."""
     user = await db.get_user(interaction.user.id)
@@ -1152,26 +1163,35 @@ async def reward_edit(
         )
         return
     
-    success = await db.edit_reward(reward_id, interaction.user.id, title=title, description=description, point_cost=cost)
+    # Look up reward by name
+    reward = await db.get_reward_by_name(interaction.user.id, reward_name)
+    if not reward:
+        await interaction.response.send_message(
+            f"❌ Reward '{reward_name}' not found!",
+            ephemeral=True
+        )
+        return
+    
+    success = await db.edit_reward(reward['id'], interaction.user.id, title=new_title, description=new_description, point_cost=new_cost)
     
     if success:
         embed = discord.Embed(
             title="✏️ Reward Updated",
-            description=f"Reward #{reward_id} has been updated.",
+            description=f"**{reward_name}** has been updated.",
             color=discord.Color.gold()
         )
         
-        if title:
-            embed.add_field(name="New Title", value=title, inline=False)
-        if description:
-            embed.add_field(name="New Description", value=description, inline=False)
-        if cost is not None:
-            embed.add_field(name="New Cost", value=f"{cost} points", inline=True)
+        if new_title:
+            embed.add_field(name="New Title", value=new_title, inline=False)
+        if new_description:
+            embed.add_field(name="New Description", value=new_description, inline=False)
+        if new_cost is not None:
+            embed.add_field(name="New Cost", value=f"{new_cost} points", inline=True)
         
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message(
-            "❌ Reward not found or you don't have permission to edit it!",
+            "❌ Failed to update reward!",
             ephemeral=True
         )
 
@@ -1559,13 +1579,24 @@ async def punishment_complete(interaction: discord.Interaction, assignment_id: i
             pass
 
 @bot.tree.command(name="punishment_approve", description="Approve a punishment completion")
-@app_commands.describe(assignment_id="The punishment assignment ID")
-async def punishment_approve(interaction: discord.Interaction, assignment_id: int):
+@app_commands.describe(assignment="The punishment assignment to approve")
+@app_commands.autocomplete(assignment=pending_punishment_assignment_autocomplete)
+async def punishment_approve(interaction: discord.Interaction, assignment: str):
     """Approve punishment completion (dominant only)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
         await interaction.response.send_message(
             "❌ Only dominants can approve punishments!",
+            ephemeral=True
+        )
+        return
+    
+    # Convert assignment string to int
+    try:
+        assignment_id = int(assignment)
+    except ValueError:
+        await interaction.response.send_message(
+            "❌ Invalid assignment ID!",
             ephemeral=True
         )
         return
@@ -1665,15 +1696,26 @@ async def punishment_approve(interaction: discord.Interaction, assignment_id: in
 
 @bot.tree.command(name="punishment_reject", description="Reject a punishment completion")
 @app_commands.describe(
-    assignment_id="The punishment assignment ID",
+    assignment="The punishment assignment to reject",
     reason="Reason for rejection"
 )
-async def punishment_reject(interaction: discord.Interaction, assignment_id: int, reason: str = None):
+@app_commands.autocomplete(assignment=pending_punishment_assignment_autocomplete)
+async def punishment_reject(interaction: discord.Interaction, assignment: str, reason: str = None):
     """Reject punishment completion (dominant only)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
         await interaction.response.send_message(
             "❌ Only dominants can reject punishments!",
+            ephemeral=True
+        )
+        return
+    
+    # Convert assignment string to int
+    try:
+        assignment_id = int(assignment)
+    except ValueError:
+        await interaction.response.send_message(
+            "❌ Invalid assignment ID!",
             ephemeral=True
         )
         return
@@ -2123,13 +2165,24 @@ async def punishment_assign_random(
 # ============ APPROVAL COMMANDS ============
 
 @bot.tree.command(name="approve", description="Approve a pending task completion")
-@app_commands.describe(completion_id="The completion ID to approve")
-async def approve(interaction: discord.Interaction, completion_id: int):
+@app_commands.describe(completion="The task completion to approve")
+@app_commands.autocomplete(completion=pending_task_completion_autocomplete)
+async def approve(interaction: discord.Interaction, completion: str):
     """Approve a task completion (dominant only)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
         await interaction.response.send_message(
             "❌ Only dominants can approve task completions!",
+            ephemeral=True
+        )
+        return
+    
+    # Convert completion string to int (autocomplete returns string ID)
+    try:
+        completion_id = int(completion)
+    except ValueError:
+        await interaction.response.send_message(
+            "❌ Invalid completion ID!",
             ephemeral=True
         )
         return
@@ -2228,15 +2281,26 @@ async def approve(interaction: discord.Interaction, completion_id: int):
 
 @bot.tree.command(name="reject", description="Reject a pending task completion (deadline stays the same)")
 @app_commands.describe(
-    completion_id="The completion ID to reject",
+    completion="The task completion to reject",
     reason="Reason for rejection (optional)"
 )
-async def reject(interaction: discord.Interaction, completion_id: int, reason: str = None):
+@app_commands.autocomplete(completion=pending_task_completion_autocomplete)
+async def reject(interaction: discord.Interaction, completion: str, reason: str = None):
     """Reject a task completion - deadline remains the same (dominant only)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
         await interaction.response.send_message(
             "❌ Only dominants can reject task completions!",
+            ephemeral=True
+        )
+        return
+    
+    # Convert completion string to int
+    try:
+        completion_id = int(completion)
+    except ValueError:
+        await interaction.response.send_message(
+            "❌ Invalid completion ID!",
             ephemeral=True
         )
         return
@@ -2301,15 +2365,26 @@ async def reject(interaction: discord.Interaction, completion_id: int, reason: s
 
 @bot.tree.command(name="reject_cancel", description="Reject task and reset deadline to next occurrence")
 @app_commands.describe(
-    completion_id="The completion ID to reject",
+    completion="The task completion to reject",
     reason="Reason for cancellation (optional)"
 )
-async def reject_cancel(interaction: discord.Interaction, completion_id: int, reason: str = None):
+@app_commands.autocomplete(completion=pending_task_completion_autocomplete)
+async def reject_cancel(interaction: discord.Interaction, completion: str, reason: str = None):
     """Reject task completion and reset deadline to next occurrence (dominant only)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
         await interaction.response.send_message(
             "❌ Only dominants can reject task completions!",
+            ephemeral=True
+        )
+        return
+    
+    # Convert completion string to int
+    try:
+        completion_id = int(completion)
+    except ValueError:
+        await interaction.response.send_message(
+            "❌ Invalid completion ID!",
             ephemeral=True
         )
         return

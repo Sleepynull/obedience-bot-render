@@ -88,7 +88,7 @@ async def punishment_autocomplete(interaction: discord.Interaction, current: str
     ][:25]  # Discord limits to 25 choices
 
 async def reward_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    """Autocomplete for reward names."""
+    """Autocomplete for reward names (for dominants)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
         return []
@@ -97,6 +97,32 @@ async def reward_autocomplete(interaction: discord.Interaction, current: str) ->
     return [
         app_commands.Choice(name=r['title'], value=r['title'])
         for r in rewards if current.lower() in r['title'].lower()
+    ][:25]
+
+async def reward_claim_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Autocomplete for reward names (for submissives claiming rewards)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'submissive':
+        return []
+    
+    # Get all dominants
+    dominants = await db.get_dominants(interaction.user.id)
+    if not dominants:
+        return []
+    
+    # Collect all rewards from all dominants
+    all_rewards = []
+    for dominant in dominants:
+        rewards = await db.get_rewards(dominant['user_id'])
+        all_rewards.extend(rewards)
+    
+    # Return autocomplete choices with cost displayed
+    return [
+        app_commands.Choice(
+            name=f"{r['title']} ({r['point_cost']} points)",
+            value=r['title']
+        )
+        for r in all_rewards if current.lower() in r['title'].lower()
     ][:25]
 
 async def task_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
@@ -1266,9 +1292,10 @@ async def reward_edit(
 
 @bot.tree.command(name="reward_claim", description="Claim a reward with your points")
 @app_commands.describe(
-    reward_id="The ID of the reward to claim"
+    reward_name="The reward to claim"
 )
-async def reward_claim(interaction: discord.Interaction, reward_id: int):
+@app_commands.autocomplete(reward_name=reward_claim_autocomplete)
+async def reward_claim(interaction: discord.Interaction, reward_name: str):
     """Claim a reward by spending points (submissive only)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'submissive':
@@ -1287,27 +1314,20 @@ async def reward_claim(interaction: discord.Interaction, reward_id: int):
         )
         return
     
-    # Get reward details from any of the dominants
-    import aiosqlite
+    # Get reward details from any of the dominants by name
     reward = None
     reward_dominant_id = None
     
     for dominant in dominants:
-        async with aiosqlite.connect(db.DATABASE_NAME) as database:
-            database.row_factory = aiosqlite.Row
-            async with database.execute(
-                "SELECT * FROM rewards WHERE id = ? AND dominant_id = ?",
-                (reward_id, dominant['user_id'])
-            ) as cursor:
-                result = await cursor.fetchone()
-                if result:
-                    reward = dict(result)
-                    reward_dominant_id = dominant['user_id']
-                    break
+        result = await db.get_reward_by_name(dominant['user_id'], reward_name)
+        if result:
+            reward = result
+            reward_dominant_id = dominant['user_id']
+            break
     
     if not reward:
         await interaction.response.send_message(
-            "❌ Reward not found! Use `/rewards` to see available rewards.",
+            f"❌ Reward '{reward_name}' not found! Use `/rewards` to see available rewards.",
             ephemeral=True
         )
         return
@@ -1324,7 +1344,7 @@ async def reward_claim(interaction: discord.Interaction, reward_id: int):
     new_total = await db.update_points(interaction.user.id, -reward['point_cost'])
     
     # Assign reward
-    await db.assign_reward(interaction.user.id, reward_dominant_id, reward_id, "Self-claimed")
+    await db.assign_reward(interaction.user.id, reward_dominant_id, reward['id'], "Self-claimed")
     
     embed = discord.Embed(
         title="🎉 Reward Claimed!",
@@ -1335,7 +1355,6 @@ async def reward_claim(interaction: discord.Interaction, reward_id: int):
     embed.add_field(name="Description", value=reward['description'], inline=False)
     embed.add_field(name="Cost", value=f"-{reward['point_cost']} points", inline=True)
     embed.add_field(name="New Balance", value=f"{new_total} points", inline=True)
-    embed.set_footer(text=f"Reward ID: {reward_id}")
     
     await interaction.response.send_message(embed=embed)
     

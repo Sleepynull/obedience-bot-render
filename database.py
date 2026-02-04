@@ -110,7 +110,8 @@ async def init_db():
                 description TEXT,
                 point_cost INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (dominant_id) REFERENCES users(user_id)
+                FOREIGN KEY (dominant_id) REFERENCES users(user_id),
+                UNIQUE(dominant_id, title)
             )
         """)
         
@@ -122,7 +123,8 @@ async def init_db():
                 title TEXT NOT NULL,
                 description TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (dominant_id) REFERENCES users(user_id)
+                FOREIGN KEY (dominant_id) REFERENCES users(user_id),
+                UNIQUE(dominant_id, title)
             )
         """)
         
@@ -282,6 +284,21 @@ async def get_dominants(submissive_id: int) -> List[Dict[str, Any]]:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+async def get_next_available_id(db, table: str) -> int:
+    """Find the lowest available ID in a table (reuses deleted IDs)."""
+    # Get the max ID first
+    async with db.execute(f"SELECT MAX(id) FROM {table}") as cursor:
+        row = await cursor.fetchone()
+        max_id = row[0] if row[0] else 0
+    
+    # Find gaps in the ID sequence
+    for potential_id in range(1, max_id + 2):
+        async with db.execute(f"SELECT id FROM {table} WHERE id = ?", (potential_id,)) as cursor:
+            if not await cursor.fetchone():
+                return potential_id
+    
+    return max_id + 1
+
 # Task operations
 async def create_task(submissive_id: int, dominant_id: int, title: str, 
                      description: str, frequency: str, point_value: int, deadline: datetime.datetime = None,
@@ -295,16 +312,19 @@ async def create_task(submissive_id: int, dominant_id: int, title: str,
         if recurrence_enabled and (days_of_week or recurrence_interval_hours):
             next_occurrence = calculate_next_occurrence(days_of_week, time_of_day, recurrence_interval_hours)
         
-        cursor = await db.execute("""
+        # Get next available ID
+        next_id = await get_next_available_id(db, 'tasks')
+        
+        await db.execute("""
             INSERT INTO tasks (
-                submissive_id, dominant_id, title, description, frequency, point_value, deadline, deadline_time,
+                id, submissive_id, dominant_id, title, description, frequency, point_value, deadline, deadline_time,
                 recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence, auto_punishment_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (submissive_id, dominant_id, title, description, frequency, point_value, deadline, deadline_time,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (next_id, submissive_id, dominant_id, title, description, frequency, point_value, deadline, deadline_time,
               recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence, auto_punishment_id))
         await db.commit()
-        return cursor.lastrowid
+        return next_id
 
 def calculate_next_occurrence(days_of_week: str = None, time_of_day: str = None, 
                              interval_hours: int = None) -> datetime.datetime:
@@ -636,12 +656,15 @@ async def get_task_stats(submissive_id: int, days: int = 7) -> Dict[str, Any]:
 async def create_reward(dominant_id: int, title: str, description: str, point_cost: int) -> int:
     """Create a new reward."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
-        cursor = await db.execute("""
-            INSERT INTO rewards (dominant_id, title, description, point_cost)
-            VALUES (?, ?, ?, ?)
-        """, (dominant_id, title, description, point_cost))
+        # Get next available ID
+        next_id = await get_next_available_id(db, 'rewards')
+        
+        await db.execute("""
+            INSERT INTO rewards (id, dominant_id, title, description, point_cost)
+            VALUES (?, ?, ?, ?, ?)
+        """, (next_id, dominant_id, title, description, point_cost))
         await db.commit()
-        return cursor.lastrowid
+        return next_id
 
 async def get_rewards(dominant_id: int) -> List[Dict[str, Any]]:
     """Get all rewards for a dominant."""
@@ -736,12 +759,15 @@ async def assign_reward(submissive_id: int, dominant_id: int, reward_id: int, re
 async def create_punishment(dominant_id: int, title: str, description: str) -> int:
     """Create a new punishment."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
-        cursor = await db.execute("""
-            INSERT INTO punishments (dominant_id, title, description)
-            VALUES (?, ?, ?)
-        """, (dominant_id, title, description))
+        # Get next available ID
+        next_id = await get_next_available_id(db, 'punishments')
+        
+        await db.execute("""
+            INSERT INTO punishments (id, dominant_id, title, description)
+            VALUES (?, ?, ?, ?)
+        """, (next_id, dominant_id, title, description))
         await db.commit()
-        return cursor.lastrowid
+        return next_id
 
 async def delete_punishment(punishment_id: int, dominant_id: int) -> bool:
     """Delete a punishment (dominant only)."""

@@ -439,46 +439,53 @@ async def task_add(
         if day_numbers:
             days_of_week_str = ','.join(day_numbers)
     
-    # Get submissive's timezone
+    # Get both timezones
+    dom_timezone = await db.get_user_timezone(interaction.user.id)
     sub_timezone = await db.get_user_timezone(submissive.id)
-    user_tz = pytz.timezone(sub_timezone)
+    dom_tz = pytz.timezone(dom_timezone)
+    sub_tz = pytz.timezone(sub_timezone)
     
     # Calculate deadline - prioritize specific datetime > time-only > hours
     deadline = None
     if deadline_datetime:
         try:
-            # Parse datetime and localize to user's timezone
+            # Parse datetime and localize to DOMINANT's timezone, then convert to submissive's
             naive_dt = datetime.datetime.strptime(deadline_datetime, "%Y-%m-%d %H:%M")
-            deadline = user_tz.localize(naive_dt)
+            deadline = dom_tz.localize(naive_dt)
+            # Convert to submissive's timezone (keeps the same absolute moment in time)
+            deadline = deadline.astimezone(sub_tz)
         except ValueError:
             await interaction.response.send_message(
-                f"❌ Invalid datetime format! Use: YYYY-MM-DD HH:MM (e.g., 2026-02-05 15:30)\nYour timezone: {sub_timezone}",
+                f"❌ Invalid datetime format! Use: YYYY-MM-DD HH:MM (e.g., 2026-02-05 15:30)\nYour timezone: {dom_timezone}",
                 ephemeral=True
             )
             return
     elif deadline_time:
-        # Parse time and calculate next occurrence of that time in user's timezone
+        # Parse time in DOMINANT's timezone and convert to submissive's
         try:
             time_parts = deadline_time.split(':')
             hour = int(time_parts[0])
             minute = int(time_parts[1])
             
-            # Get current time in user's timezone
-            now = datetime.datetime.now(user_tz)
+            # Get current time in dominant's timezone
+            now = datetime.datetime.now(dom_tz)
             deadline = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             
-            # If time has already passed today, set for tomorrow
+            # If time has already passed today in dominant's timezone, set for tomorrow
             if deadline <= now:
                 deadline = deadline + datetime.timedelta(days=1)
+            
+            # Convert to submissive's timezone
+            deadline = deadline.astimezone(sub_tz)
         except (ValueError, IndexError):
             await interaction.response.send_message(
-                f"❌ Invalid time format! Use: HH:MM (e.g., 09:00 for 9 AM)\nYour timezone: {sub_timezone}",
+                f"❌ Invalid time format! Use: HH:MM (e.g., 09:00 for 9 AM)\nYour timezone: {dom_timezone}",
                 ephemeral=True
             )
             return
     elif deadline_hours:
-        # Calculate based on current time in user's timezone
-        now = datetime.datetime.now(user_tz)
+        # Calculate based on current time (timezone-independent for relative deadlines)
+        now = datetime.datetime.now(sub_tz)
         deadline = now + datetime.timedelta(hours=deadline_hours)
     
     # Handle auto-punishment setup
@@ -701,6 +708,17 @@ async def task_complete(interaction: discord.Interaction, task_id: int, proof: d
     
     await interaction.response.send_message(embed=embed)
     
+    # Get task title for notification
+    import aiosqlite
+    async with aiosqlite.connect(db.DATABASE_NAME) as database:
+        database.row_factory = aiosqlite.Row
+        async with database.execute(
+            "SELECT title FROM tasks WHERE id = ?",
+            (task_id,)
+        ) as cursor:
+            task_row = await cursor.fetchone()
+            task_title = task_row[0] if task_row else "Unknown"
+    
     # Notify dominant
     dominant = await db.get_dominant(interaction.user.id)
     if dominant:
@@ -711,7 +729,7 @@ async def task_complete(interaction: discord.Interaction, task_id: int, proof: d
                 description=f"**{interaction.user.display_name}** submitted a task completion.",
                 color=discord.Color.blue()
             )
-            notif_embed.add_field(name="Task ID", value=str(task_id), inline=True)
+            notif_embed.add_field(name="Task", value=f"**{task_title}** (ID: {task_id})", inline=False)
             notif_embed.add_field(name="Completion ID", value=str(completion_id), inline=True)
             notif_embed.set_image(url=proof.url)
             notif_embed.set_footer(text=f"Use /approve {completion_id} or /reject {completion_id}")
@@ -1293,6 +1311,18 @@ async def punishment_assign(
     if config.PUNISHMENT_CHANNEL_NAME and interaction.guild:
         await post_to_channel(interaction.guild, config.PUNISHMENT_CHANNEL_NAME, embed)
     
+    # Get punishment details for notification
+    import aiosqlite
+    async with aiosqlite.connect(db.DATABASE_NAME) as database:
+        database.row_factory = aiosqlite.Row
+        async with database.execute(
+            "SELECT title, description FROM punishments WHERE id = ?",
+            (punishment_id,)
+        ) as cursor:
+            punishment_row = await cursor.fetchone()
+            punishment_title = punishment_row[0] if punishment_row else "Unknown"
+            punishment_desc = punishment_row[1] if punishment_row else ""
+    
     # Notify submissive via DM
     try:
         notif = discord.Embed(
@@ -1300,8 +1330,10 @@ async def punishment_assign(
             description=f"**{interaction.user.display_name}** has assigned you a punishment.",
             color=discord.Color.red()
         )
+        notif.add_field(name="Punishment", value=f"**{punishment_title}** (ID: {punishment_id})", inline=False)
+        notif.add_field(name="Description", value=punishment_desc, inline=False)
         notif.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
-        notif.add_field(name="Deadline", value=f"<t:{int(deadline.timestamp())}:R>", inline=False)
+        notif.add_field(name="Deadline", value=f"<t:{int(deadline.timestamp())}:R>", inline=True)
         notif.add_field(name="Point Penalty", value=f"-{point_penalty} points (doubles to -{point_penalty * 2} if late!)", inline=False)
         if reason:
             notif.add_field(name="Reason", value=reason, inline=False)
@@ -1341,8 +1373,21 @@ async def punishment_complete(interaction: discord.Interaction, assignment_id: i
     # Submit proof
     await db.submit_punishment_proof(assignment_id, proof.url)
     
-    # Check if there's a forward user (will be sent after approval)
-    forward_user_id = await db.get_punishment_forward_user(assignment_id)
+    # Get punishment details
+    import aiosqlite
+    async with aiosqlite.connect(db.DATABASE_NAME) as database:
+        database.row_factory = aiosqlite.Row
+        async with database.execute("""
+            SELECT p.id, p.title, ap.forward_to_user_id
+            FROM assigned_rewards_punishments ap
+            JOIN punishments p ON ap.item_id = p.id
+            WHERE ap.id = ? AND ap.type = 'punishment'
+        """, (assignment_id,)) as cursor:
+            row = await cursor.fetchone()
+            punishment_id = row[0] if row else 0
+            punishment_title = row[1] if row else "Unknown"
+            forward_user_id = row[2] if row else None
+    
     has_forward = forward_user_id is not None
     
     embed = discord.Embed(
@@ -1350,6 +1395,7 @@ async def punishment_complete(interaction: discord.Interaction, assignment_id: i
         description="Your punishment completion proof has been submitted for review.",
         color=discord.Color.orange()
     )
+    embed.add_field(name="Punishment", value=f"**{punishment_title}** (ID: {punishment_id})", inline=False)
     embed.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
     if has_forward:
         embed.add_field(name="📸 Image Forward", value="⏳ Will be sent after approval", inline=True)
@@ -1368,6 +1414,7 @@ async def punishment_complete(interaction: discord.Interaction, assignment_id: i
                 description=f"**{interaction.user.display_name}** submitted punishment proof.",
                 color=discord.Color.blue()
             )
+            notif.add_field(name="Punishment", value=f"**{punishment_title}** (ID: {punishment_id})", inline=False)
             notif.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
             if has_forward:
                 notif.add_field(name="📸 Forward Pending", value="Will be sent after approval", inline=True)
@@ -1397,13 +1444,16 @@ async def punishment_approve(interaction: discord.Interaction, assignment_id: in
         )
         return
     
-    # Get assignment details including forward user and proof URL
+    # Get assignment details including forward user, proof URL, and punishment title
     import aiosqlite
     async with aiosqlite.connect(db.DATABASE_NAME) as database:
         database.row_factory = aiosqlite.Row
-        async with database.execute(
-            "SELECT submissive_id, point_penalty, forward_to_user_id, proof_url FROM assigned_rewards_punishments WHERE id = ?",
-            (assignment_id,)
+        async with database.execute("""
+            SELECT ap.submissive_id, ap.point_penalty, ap.forward_to_user_id, ap.proof_url, p.id, p.title
+            FROM assigned_rewards_punishments ap
+            JOIN punishments p ON ap.item_id = p.id
+            WHERE ap.id = ? AND ap.type = 'punishment'
+        """, (assignment_id,)
         ) as cursor:
             row = await cursor.fetchone()
             if row:
@@ -1411,6 +1461,8 @@ async def punishment_approve(interaction: discord.Interaction, assignment_id: in
                 penalty = row[1]
                 forward_user_id = row[2]
                 proof_url = row[3]
+                punishment_id = row[4]
+                punishment_title = row[5]
                 
                 # Forward image to designated user if specified (ONLY on approval)
                 forwarded = False
@@ -1448,6 +1500,7 @@ async def punishment_approve(interaction: discord.Interaction, assignment_id: in
                     description=desc,
                     color=discord.Color.green()
                 )
+                embed.add_field(name="Punishment", value=f"**{punishment_title}** (ID: {punishment_id})", inline=False)
                 if refund_penalty > 0:
                     embed.add_field(name="Refunded", value=f"+{refund_penalty} points", inline=True)
                 if forwarded:
@@ -1469,6 +1522,8 @@ async def punishment_approve(interaction: discord.Interaction, assignment_id: in
                         description=notif_desc,
                         color=discord.Color.green()
                     )
+                    notif.add_field(name="Punishment", value=f"**{punishment_title}** (ID: {punishment_id})", inline=False)
+                    notif.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
                     notif.add_field(name="Total Points", value=str(new_total), inline=True)
                     await sub_user.send(embed=notif)
                 except:
@@ -1511,21 +1566,31 @@ async def punishment_reject(interaction: discord.Interaction, assignment_id: int
     import aiosqlite
     async with aiosqlite.connect(db.DATABASE_NAME) as database:
         database.row_factory = aiosqlite.Row
-        async with database.execute(
-            "SELECT submissive_id FROM assigned_rewards_punishments WHERE id = ?",
-            (assignment_id,)
+        async with database.execute("""
+            SELECT ap.submissive_id, p.id, p.title
+            FROM assigned_rewards_punishments ap
+            JOIN punishments p ON ap.item_id = p.id
+            WHERE ap.id = ? AND ap.type = 'punishment'
+        """, (assignment_id,)
         ) as cursor:
             row = await cursor.fetchone()
             if row:
+                submissive_id = row[0]
+                punishment_id = row[1]
+                punishment_title = row[2]
+                
                 try:
-                    sub_user = await bot.fetch_user(row[0])
+                    sub_user = await bot.fetch_user(submissive_id)
                     notif = discord.Embed(
                         title="❌ Punishment Rejected",
                         description="Your punishment proof was rejected. You must resubmit.",
                         color=discord.Color.red()
                     )
+                    notif.add_field(name="Punishment", value=f"**{punishment_title}** (ID: {punishment_id})", inline=False)
+                    notif.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
                     if reason:
                         notif.add_field(name="Reason", value=reason, inline=False)
+                    notif.set_footer(text=f"Resubmit with: /punishment_complete {assignment_id} proof:<image>")
                     await sub_user.send(embed=notif)
                 except:
                     pass
@@ -1948,7 +2013,7 @@ async def approve(interaction: discord.Interaction, completion_id: int):
     async with aiosqlite.connect(db.DATABASE_NAME) as database:
         database.row_factory = aiosqlite.Row
         async with database.execute("""
-            SELECT tc.submissive_id, tc.task_id, t.deadline, t.active
+            SELECT tc.submissive_id, tc.task_id, t.deadline, t.active, t.title
             FROM task_completions tc
             JOIN tasks t ON tc.task_id = t.id
             WHERE tc.id = ?
@@ -1959,6 +2024,7 @@ async def approve(interaction: discord.Interaction, completion_id: int):
                 task_id = row[1]
                 deadline = row[2]
                 was_late = row[3] == 0  # Task was deactivated due to missed deadline
+                task_title = row[4]
                 
                 # Award points (double if it was late to refund the deduction)
                 points_to_award = points * 2 if was_late else points
@@ -1979,8 +2045,9 @@ async def approve(interaction: discord.Interaction, completion_id: int):
                     description=description,
                     color=discord.Color.green()
                 )
+                embed.add_field(name="Task", value=f"**{task_title}** (ID: {task_id})", inline=False)
                 embed.add_field(name="Points Awarded", value=str(points_to_award), inline=True)
-                embed.add_field(name="Task ID", value=str(task_id), inline=True)
+                embed.add_field(name="Completion ID", value=str(completion_id), inline=True)
                 if was_late:
                     embed.add_field(name="Note", value=f"Refunded {points} deducted points + {points} task points", inline=False)
                 
@@ -2006,6 +2073,7 @@ async def approve(interaction: discord.Interaction, completion_id: int):
                         description=notif_desc,
                         color=discord.Color.green()
                     )
+                    notif.add_field(name="Task", value=f"**{task_title}** (ID: {task_id})", inline=False)
                     notif.add_field(name="Points Earned", value=str(points_to_award), inline=True)
                     notif.add_field(name="Total Points", value=str(new_total), inline=True)
                     
@@ -2051,21 +2119,26 @@ async def reject(interaction: discord.Interaction, completion_id: int, reason: s
     import aiosqlite
     async with aiosqlite.connect(db.DATABASE_NAME) as database:
         database.row_factory = aiosqlite.Row
-        async with database.execute(
-            "SELECT submissive_id, task_id FROM task_completions WHERE id = ?",
-            (completion_id,)
+        async with database.execute("""
+            SELECT tc.submissive_id, tc.task_id, t.title
+            FROM task_completions tc
+            JOIN tasks t ON tc.task_id = t.id
+            WHERE tc.id = ?
+        """, (completion_id,)
         ) as cursor:
             row = await cursor.fetchone()
             if row:
                 submissive_id = row[0]
                 task_id = row[1]
+                task_title = row[2]
                 
                 embed = discord.Embed(
                     title="❌ Task Rejected",
                     description=f"Task completion #{completion_id} has been rejected.\n⏰ **Deadline remains the same.**",
                     color=discord.Color.red()
                 )
-                embed.add_field(name="Task ID", value=str(task_id), inline=True)
+                embed.add_field(name="Task", value=f"**{task_title}** (ID: {task_id})", inline=False)
+                embed.add_field(name="Completion ID", value=str(completion_id), inline=True)
                 if reason:
                     embed.add_field(name="Reason", value=reason, inline=False)
                 
@@ -2083,7 +2156,8 @@ async def reject(interaction: discord.Interaction, completion_id: int, reason: s
                         description=f"Your task completion was rejected by {interaction.user.display_name}.",
                         color=discord.Color.red()
                     )
-                    notif.add_field(name="Task ID", value=str(task_id), inline=True)
+                    notif.add_field(name="Task", value=f"**{task_title}** (ID: {task_id})", inline=False)
+                    notif.add_field(name="Completion ID", value=str(completion_id), inline=True)
                     if reason:
                         notif.add_field(name="Reason", value=reason, inline=False)
                     notif.set_footer(text="⏰ Deadline remains the same. Submit again!")
@@ -2119,21 +2193,26 @@ async def reject_cancel(interaction: discord.Interaction, completion_id: int, re
     import aiosqlite
     async with aiosqlite.connect(db.DATABASE_NAME) as database:
         database.row_factory = aiosqlite.Row
-        async with database.execute(
-            "SELECT submissive_id, task_id FROM task_completions WHERE id = ?",
-            (completion_id,)
+        async with database.execute("""
+            SELECT tc.submissive_id, tc.task_id, t.title
+            FROM task_completions tc
+            JOIN tasks t ON tc.task_id = t.id
+            WHERE tc.id = ?
+        """, (completion_id,)
         ) as cursor:
             row = await cursor.fetchone()
             if row:
                 submissive_id = row[0]
                 task_id = row[1]
+                task_title = row[2]
                 
                 embed = discord.Embed(
                     title="❌ Task Rejected & Reset",
                     description=f"Task completion #{completion_id} rejected.\n🔄 **Deadline reset to next occurrence.**",
                     color=discord.Color.orange()
                 )
-                embed.add_field(name="Task ID", value=str(task_id), inline=True)
+                embed.add_field(name="Task", value=f"**{task_title}** (ID: {task_id})", inline=False)
+                embed.add_field(name="Completion ID", value=str(completion_id), inline=True)
                 if reason:
                     embed.add_field(name="Reason", value=reason, inline=False)
                 
@@ -2151,7 +2230,8 @@ async def reject_cancel(interaction: discord.Interaction, completion_id: int, re
                         description=f"Your task was rejected by {interaction.user.display_name}.",
                         color=discord.Color.orange()
                     )
-                    notif.add_field(name="Task ID", value=str(task_id), inline=True)
+                    notif.add_field(name="Task", value=f"**{task_title}** (ID: {task_id})", inline=False)
+                    notif.add_field(name="Completion ID", value=str(completion_id), inline=True)
                     if reason:
                         notif.add_field(name="Reason", value=reason, inline=False)
                     notif.set_footer(text="🔄 Deadline has been reset to next occurrence.")

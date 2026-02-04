@@ -310,12 +310,70 @@ async def check_recurring_tasks():
         except:
             pass
 
+@tasks.loop(minutes=15)
+async def send_reminders():
+    """Send reminders for tasks and punishments based on reminder intervals."""
+    # Check tasks needing reminders
+    tasks_to_remind = await db.get_tasks_needing_reminders()
+    
+    for task in tasks_to_remind:
+        try:
+            sub_user = await bot.fetch_user(task['submissive_id'])
+            deadline_dt = datetime.datetime.fromisoformat(task['deadline'])
+            time_remaining = deadline_dt - datetime.datetime.now()
+            hours_remaining = int(time_remaining.total_seconds() / 3600)
+            
+            embed = discord.Embed(
+                title="⏰ Task Reminder",
+                description=f"Don't forget about your task: **{task['title']}**",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Description", value=task['description'], inline=False)
+            embed.add_field(name="Points", value=str(task['point_value']), inline=True)
+            embed.add_field(name="Time Remaining", value=f"~{hours_remaining} hours", inline=True)
+            embed.add_field(name="Deadline", value=f"<t:{int(deadline_dt.timestamp())}:R>", inline=False)
+            embed.set_footer(text=f"Task ID: {task['id']} | Reminders every {task['reminder_interval_hours']}h")
+            
+            await sub_user.send(embed=embed)
+            await db.update_task_reminder_sent(task['id'])
+        except Exception as e:
+            print(f"[REMINDER] Failed to send task reminder for task {task['id']}: {e}")
+    
+    # Check punishments needing reminders
+    punishments_to_remind = await db.get_punishments_needing_reminders()
+    
+    for punishment in punishments_to_remind:
+        try:
+            sub_user = await bot.fetch_user(punishment['submissive_id'])
+            deadline_dt = datetime.datetime.fromisoformat(punishment['deadline'])
+            time_remaining = deadline_dt - datetime.datetime.now()
+            hours_remaining = int(time_remaining.total_seconds() / 3600)
+            
+            embed = discord.Embed(
+                title="⚠️ Punishment Reminder",
+                description=f"Don't forget about your punishment: **{punishment['title']}**",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Description", value=punishment['description'], inline=False)
+            embed.add_field(name="Penalty", value=f"{punishment['point_penalty']} points", inline=True)
+            embed.add_field(name="Time Remaining", value=f"~{hours_remaining} hours", inline=True)
+            embed.add_field(name="Deadline", value=f"<t:{int(deadline_dt.timestamp())}:R>", inline=False)
+            if punishment.get('reason'):
+                embed.add_field(name="Reason", value=punishment['reason'], inline=False)
+            embed.set_footer(text=f"Assignment ID: {punishment['id']} | Reminders every {punishment['reminder_interval_hours']}h")
+            
+            await sub_user.send(embed=embed)
+            await db.update_punishment_reminder_sent(punishment['id'])
+        except Exception as e:
+            print(f"[REMINDER] Failed to send punishment reminder for assignment {punishment['id']}: {e}")
+
 @bot.event
 async def on_ready():
     """Initialize bot when ready."""
     await db.init_db()
     check_deadlines.start()  # Start deadline checker
     check_recurring_tasks.start()  # Start recurring task reset checker
+    send_reminders.start()  # Start reminder sender
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s)")
@@ -463,7 +521,8 @@ async def link(interaction: discord.Interaction, submissive: discord.Member):
     recurring="Enable auto-reset after completion",
     days_of_week="Days for weekly tasks: Mon,Wed,Fri (use Mon/Tue/Wed/Thu/Fri/Sat/Sun)",
     time_of_day="Time in HH:MM format (24hr, e.g., 14:30 for 2:30 PM)",
-    interval_hours="For custom: hours between occurrences"
+    interval_hours="For custom: hours between occurrences",
+    reminder_hours="Send reminders every X hours (optional, e.g., 12 for twice daily)"
 )
 @app_commands.choices(frequency=[
     app_commands.Choice(name="Daily", value="daily"),
@@ -484,7 +543,8 @@ async def task_add(
     recurring: bool = False,
     days_of_week: str = None,
     time_of_day: str = None,
-    interval_hours: int = None
+    interval_hours: int = None,
+    reminder_hours: int = None
 ):
     """Add a new task (dominant only)."""
     # Verify dominant
@@ -592,7 +652,8 @@ async def task_add(
         days_of_week_str,
         time_of_day,
         auto_punishment_id,
-        deadline_time  # Store the deadline_time for automatic reset on approval
+        deadline_time,  # Store the deadline_time for automatic reset on approval
+        reminder_hours  # Reminder interval in hours
     )
     
     embed = discord.Embed(
@@ -846,7 +907,8 @@ async def task_delete(interaction: discord.Interaction, task_id: int):
     description="New task description (optional)",
     points="New point value (optional)",
     deadline_hours="New deadline in hours (optional)",
-    deadline_datetime="New specific deadline YYYY-MM-DD HH:MM (optional)"
+    deadline_datetime="New specific deadline YYYY-MM-DD HH:MM (optional)",
+    reminder_hours="Reminder interval in hours (optional, 0 to disable)"
 )
 async def task_edit(
     interaction: discord.Interaction,
@@ -855,7 +917,8 @@ async def task_edit(
     description: str = None,
     points: int = None,
     deadline_hours: int = None,
-    deadline_datetime: str = None
+    deadline_datetime: str = None,
+    reminder_hours: int = None
 ):
     """Edit a task (dominant only)."""
     user = await db.get_user(interaction.user.id)
@@ -886,7 +949,8 @@ async def task_edit(
         title=title, 
         description=description, 
         point_value=points,
-        deadline=new_deadline
+        deadline=new_deadline,
+        reminder_interval_hours=reminder_hours
     )
     
     if success:
@@ -904,6 +968,11 @@ async def task_edit(
             embed.add_field(name="New Points", value=str(points), inline=True)
         if new_deadline:
             embed.add_field(name="New Deadline", value=f"<t:{int(new_deadline.timestamp())}:R>", inline=True)
+        if reminder_hours is not None:
+            if reminder_hours == 0:
+                embed.add_field(name="⏰ Reminders", value="Disabled", inline=True)
+            else:
+                embed.add_field(name="⏰ Reminders", value=f"Every {reminder_hours} hours", inline=True)
         
         await interaction.response.send_message(embed=embed)
     else:
@@ -1388,7 +1457,8 @@ async def punishment_edit(
     deadline_hours="Hours to complete (default: 24)",
     deadline_datetime="Specific deadline (YYYY-MM-DD HH:MM format, e.g., 2026-02-05 15:30)",
     point_penalty="Points deducted if not completed (default: 10)",
-    forward_to="User who will receive the proof image (optional)"
+    forward_to="User who will receive the proof image (optional)",
+    reminder_hours="Send reminders every X hours (optional, e.g., 12 for twice daily)"
 )
 @app_commands.autocomplete(punishment_name=punishment_autocomplete)
 async def punishment_assign(
@@ -1399,7 +1469,8 @@ async def punishment_assign(
     deadline_hours: int = 24,
     deadline_datetime: str = None,
     point_penalty: int = 10,
-    forward_to: discord.Member = None
+    forward_to: discord.Member = None,
+    reminder_hours: int = None
 ):
     """Assign a punishment with proof requirement and deadline (dominant only)."""
     user = await db.get_user(interaction.user.id)
@@ -1442,7 +1513,8 @@ async def punishment_assign(
         reason, 
         deadline, 
         point_penalty,
-        forward_to_id
+        forward_to_id,
+        reminder_hours
     )
     
     embed = discord.Embed(
@@ -1456,6 +1528,8 @@ async def punishment_assign(
     embed.add_field(name="Point Penalty", value=f"{point_penalty} (doubles if late)", inline=True)
     if reason:
         embed.add_field(name="Reason", value=reason, inline=False)
+    if reminder_hours:
+        embed.add_field(name="⏰ Reminders", value=f"Every {reminder_hours} hours", inline=True)
     if forward_to:
         embed.add_field(name="📸 Image Forward", value=f"Proof will be sent to {forward_to.mention}", inline=False)
     

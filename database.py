@@ -40,6 +40,32 @@ async def init_db():
         except:
             pass  # Column already exists
         
+        # Add reminder columns to tasks if they don't exist (migration)
+        try:
+            await db.execute("ALTER TABLE tasks ADD COLUMN reminder_interval_hours INTEGER")
+            await db.commit()
+        except:
+            pass  # Column already exists
+        
+        try:
+            await db.execute("ALTER TABLE tasks ADD COLUMN last_reminder_sent TIMESTAMP")
+            await db.commit()
+        except:
+            pass  # Column already exists
+        
+        # Add reminder columns to assigned_rewards_punishments if they don't exist (migration)
+        try:
+            await db.execute("ALTER TABLE assigned_rewards_punishments ADD COLUMN reminder_interval_hours INTEGER")
+            await db.commit()
+        except:
+            pass  # Column already exists
+        
+        try:
+            await db.execute("ALTER TABLE assigned_rewards_punishments ADD COLUMN last_reminder_sent TIMESTAMP")
+            await db.commit()
+        except:
+            pass  # Column already exists
+        
         # Relationships table - maps dominants to submissives
         await db.execute("""
             CREATE TABLE IF NOT EXISTS relationships (
@@ -304,8 +330,8 @@ async def create_task(submissive_id: int, dominant_id: int, title: str,
                      description: str, frequency: str, point_value: int, deadline: datetime.datetime = None,
                      recurrence_enabled: bool = False, recurrence_interval_hours: int = None,
                      days_of_week: str = None, time_of_day: str = None, auto_punishment_id: int = None,
-                     deadline_time: str = None) -> int:
-    """Create a new task with optional recurring schedule and auto-punishment."""
+                     deadline_time: str = None, reminder_interval_hours: int = None) -> int:
+    """Create a new task with optional recurring schedule, auto-punishment, and reminders."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
         # Calculate next occurrence if recurring
         next_occurrence = None
@@ -318,11 +344,11 @@ async def create_task(submissive_id: int, dominant_id: int, title: str,
         await db.execute("""
             INSERT INTO tasks (
                 id, submissive_id, dominant_id, title, description, frequency, point_value, deadline, deadline_time,
-                recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence, auto_punishment_id
+                recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence, auto_punishment_id, reminder_interval_hours
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (next_id, submissive_id, dominant_id, title, description, frequency, point_value, deadline, deadline_time,
-              recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence, auto_punishment_id))
+              recurrence_enabled, recurrence_interval_hours, days_of_week, time_of_day, next_occurrence, auto_punishment_id, reminder_interval_hours))
         await db.commit()
         return next_id
 
@@ -587,7 +613,7 @@ async def delete_task(task_id: int, dominant_id: int) -> bool:
         return True
 
 async def edit_task(task_id: int, dominant_id: int, title: str = None, description: str = None, 
-                   point_value: int = None, deadline: datetime.datetime = None) -> bool:
+                   point_value: int = None, deadline: datetime.datetime = None, reminder_interval_hours: int = None) -> bool:
     """Edit a task (dominant only). Only updates provided fields."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
         # Verify dominant owns this task
@@ -611,6 +637,9 @@ async def edit_task(task_id: int, dominant_id: int, title: str = None, descripti
         if deadline is not None:
             updates.append("deadline = ?")
             params.append(deadline)
+        if reminder_interval_hours is not None:
+            updates.append("reminder_interval_hours = ?")
+            params.append(reminder_interval_hours)
         
         if not updates:
             return True  # Nothing to update
@@ -825,14 +854,14 @@ async def get_punishments(dominant_id: int) -> List[Dict[str, Any]]:
 
 async def assign_punishment(submissive_id: int, dominant_id: int, punishment_id: int, 
                           reason: str = None, deadline: datetime.datetime = None, point_penalty: int = 10,
-                          forward_to_user_id: int = None) -> int:
-    """Assign a punishment to a submissive with deadline and point penalty."""
+                          forward_to_user_id: int = None, reminder_interval_hours: int = None) -> int:
+    """Assign a punishment to a submissive with deadline, point penalty, and optional reminders."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
         cursor = await db.execute("""
             INSERT INTO assigned_rewards_punishments 
-            (submissive_id, dominant_id, type, item_id, reason, deadline, point_penalty, forward_to_user_id, completion_status)
-            VALUES (?, ?, 'punishment', ?, ?, ?, ?, ?, 'pending')
-        """, (submissive_id, dominant_id, punishment_id, reason, deadline, point_penalty, forward_to_user_id))
+            (submissive_id, dominant_id, type, item_id, reason, deadline, point_penalty, forward_to_user_id, completion_status, reminder_interval_hours)
+            VALUES (?, ?, 'punishment', ?, ?, ?, ?, ?, 'pending', ?)
+        """, (submissive_id, dominant_id, punishment_id, reason, deadline, point_penalty, forward_to_user_id, reminder_interval_hours))
         await db.commit()
         return cursor.lastrowid
 
@@ -1157,3 +1186,63 @@ async def get_pending_punishment_assignments_for_autocomplete(dominant_id: int) 
         """, (dominant_id,)) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+# Reminder operations
+async def get_tasks_needing_reminders() -> List[Dict[str, Any]]:
+    """Get active tasks with reminders that need to be sent."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT t.*, u.user_id as submissive_user_id
+            FROM tasks t
+            JOIN users u ON t.submissive_id = u.user_id
+            WHERE t.active = 1 
+            AND t.reminder_interval_hours IS NOT NULL
+            AND t.deadline IS NOT NULL
+            AND t.deadline > CURRENT_TIMESTAMP
+            AND (
+                t.last_reminder_sent IS NULL 
+                OR datetime(t.last_reminder_sent, '+' || t.reminder_interval_hours || ' hours') <= CURRENT_TIMESTAMP
+            )
+        """) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def get_punishments_needing_reminders() -> List[Dict[str, Any]]:
+    """Get active punishment assignments with reminders that need to be sent."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT ap.*, p.title, p.description
+            FROM assigned_rewards_punishments ap
+            JOIN punishments p ON ap.item_id = p.id
+            WHERE ap.type = 'punishment'
+            AND ap.completion_status = 'pending'
+            AND ap.reminder_interval_hours IS NOT NULL
+            AND ap.deadline IS NOT NULL
+            AND ap.deadline > CURRENT_TIMESTAMP
+            AND (
+                ap.last_reminder_sent IS NULL 
+                OR datetime(ap.last_reminder_sent, '+' || ap.reminder_interval_hours || ' hours') <= CURRENT_TIMESTAMP
+            )
+        """) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def update_task_reminder_sent(task_id: int):
+    """Update the last reminder sent timestamp for a task."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        await db.execute(
+            "UPDATE tasks SET last_reminder_sent = CURRENT_TIMESTAMP WHERE id = ?",
+            (task_id,)
+        )
+        await db.commit()
+
+async def update_punishment_reminder_sent(assignment_id: int):
+    """Update the last reminder sent timestamp for a punishment assignment."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        await db.execute(
+            "UPDATE assigned_rewards_punishments SET last_reminder_sent = CURRENT_TIMESTAMP WHERE id = ?",
+            (assignment_id,)
+        )
+        await db.commit()

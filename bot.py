@@ -1530,13 +1530,13 @@ async def punishment_reject(interaction: discord.Interaction, assignment_id: int
                 except:
                     pass
 
-@bot.tree.command(name="punishment_cancel", description="Cancel a punishment (no resubmission required)")
+@bot.tree.command(name="punishment_cancel", description="Cancel a punishment and refund points if deducted")
 @app_commands.describe(
     assignment_id="The punishment assignment ID",
     reason="Reason for cancellation"
 )
 async def punishment_cancel(interaction: discord.Interaction, assignment_id: int, reason: str = None):
-    """Cancel punishment - marks as rejected but no resubmission needed (dominant only)."""
+    """Cancel punishment and refund points if already deducted (dominant only)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
         await interaction.response.send_message(
@@ -1545,7 +1545,7 @@ async def punishment_cancel(interaction: discord.Interaction, assignment_id: int
         )
         return
     
-    result = await db.approve_punishment_completion(assignment_id, interaction.user.id, False)
+    result = await db.cancel_punishment(assignment_id, interaction.user.id)
     if result is None:
         await interaction.response.send_message(
             "❌ Punishment not found or already reviewed!",
@@ -1553,9 +1553,15 @@ async def punishment_cancel(interaction: discord.Interaction, assignment_id: int
         )
         return
     
+    # Refund points if they were deducted
+    refund_text = ""
+    if result['refund_penalty'] > 0:
+        new_total = await db.update_points(result['submissive_id'], result['refund_penalty'])
+        refund_text = f"\n💰 **+{result['refund_penalty']} points refunded!**"
+    
     embed = discord.Embed(
         title="❌ Punishment Cancelled",
-        description=f"Punishment #{assignment_id} has been cancelled.\nNo resubmission required.",
+        description=f"Punishment #{assignment_id} has been cancelled.{refund_text}",
         color=discord.Color.orange()
     )
     if reason:
@@ -1564,27 +1570,22 @@ async def punishment_cancel(interaction: discord.Interaction, assignment_id: int
     await interaction.response.send_message(embed=embed)
     
     # Notify submissive
-    import aiosqlite
-    async with aiosqlite.connect(db.DATABASE_NAME) as database:
-        database.row_factory = aiosqlite.Row
-        async with database.execute(
-            "SELECT submissive_id FROM assigned_rewards_punishments WHERE id = ?",
-            (assignment_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                try:
-                    sub_user = await bot.fetch_user(row[0])
-                    notif = discord.Embed(
-                        title="❌ Punishment Cancelled",
-                        description="Your punishment has been cancelled by your dominant.\n✅ **No resubmission needed.**",
-                        color=discord.Color.orange()
-                    )
-                    if reason:
-                        notif.add_field(name="Reason", value=reason, inline=False)
-                    await sub_user.send(embed=notif)
-                except:
-                    pass
+    try:
+        sub_user = await bot.fetch_user(result['submissive_id'])
+        notif_desc = "Your punishment has been cancelled by your dominant.\n✅ **No resubmission needed.**"
+        if result['refund_penalty'] > 0:
+            notif_desc += f"\n💚 **+{result['refund_penalty']} points refunded!**"
+        
+        notif = discord.Embed(
+            title="❌ Punishment Cancelled",
+            description=notif_desc,
+            color=discord.Color.green() if result['refund_penalty'] > 0 else discord.Color.orange()
+        )
+        if reason:
+            notif.add_field(name="Reason", value=reason, inline=False)
+        await sub_user.send(embed=notif)
+    except:
+        pass
 
 @bot.tree.command(name="punishment_remind", description="Send a reminder to submissive about active punishment")
 @app_commands.describe(
@@ -2299,6 +2300,63 @@ async def points(interaction: discord.Interaction, submissive: discord.Member = 
             embed.add_field(name="🎁 Rewards", value="Keep earning points to unlock rewards!", inline=False)
     
     await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="points_give", description="Give or take points from a submissive")
+@app_commands.describe(
+    submissive="The submissive to give/take points from",
+    amount="Amount of points (positive to give, negative to take)",
+    reason="Reason for the point adjustment (optional)"
+)
+async def points_give(interaction: discord.Interaction, submissive: discord.Member, amount: int, reason: str = None):
+    """Manually give or take points (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can give/take points!",
+            ephemeral=True
+        )
+        return
+    
+    # Verify relationship
+    submissives = await db.get_submissives(interaction.user.id)
+    if not any(s['user_id'] == submissive.id for s in submissives):
+        await interaction.response.send_message(
+            f"❌ {submissive.mention} is not linked to you!",
+            ephemeral=True
+        )
+        return
+    
+    # Update points
+    new_total = await db.update_points(submissive.id, amount)
+    
+    # Create embed
+    action = "given to" if amount > 0 else "taken from"
+    embed = discord.Embed(
+        title="💰 Points Adjusted",
+        description=f"{abs(amount)} points {action} {submissive.mention}",
+        color=discord.Color.green() if amount > 0 else discord.Color.red()
+    )
+    embed.add_field(name="New Total", value=str(new_total), inline=True)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+    
+    # Notify submissive
+    try:
+        notif_desc = f"**{interaction.user.display_name}** {'gave you' if amount > 0 else 'took'} **{abs(amount)}** points"
+        if reason:
+            notif_desc += f"\n\n**Reason:** {reason}"
+        
+        notif = discord.Embed(
+            title="💰 Points Adjusted" if amount > 0 else "⚠️ Points Deducted",
+            description=notif_desc,
+            color=discord.Color.green() if amount > 0 else discord.Color.orange()
+        )
+        notif.add_field(name="New Total", value=str(new_total), inline=True)
+        await submissive.send(embed=notif)
+    except:
+        pass
 
 @bot.tree.command(name="stats", description="View task completion statistics")
 @app_commands.describe(

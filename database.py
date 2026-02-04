@@ -873,6 +873,36 @@ async def get_pending_punishments(dominant_id: int) -> List[Dict[str, Any]]:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+async def cancel_punishment(assignment_id: int, reviewer_id: int) -> Optional[Dict[str, Any]]:
+    """Cancel a punishment and refund penalty points if already deducted. Returns dict with submissive_id and refunded penalty."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Get assignment info
+        async with db.execute("""
+            SELECT submissive_id, point_penalty, completion_status 
+            FROM assigned_rewards_punishments 
+            WHERE id = ? AND type = 'punishment'
+        """, (assignment_id,)) as cursor:
+            row = await cursor.fetchone()
+            if not row or row[2] in ('approved', 'rejected'):
+                return None  # Already reviewed or doesn't exist
+            submissive_id, penalty, status = row
+        
+        # Mark as approved (cancelled)
+        await db.execute("""
+            UPDATE assigned_rewards_punishments 
+            SET completion_status = 'approved', reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (reviewer_id, assignment_id))
+        
+        await db.commit()
+        
+        # Return info for point refund - refund if it was expired (points already deducted)
+        refund_amount = penalty if status == 'expired' else 0
+        return {
+            'submissive_id': submissive_id,
+            'refund_penalty': refund_amount
+        }
+
 async def get_active_punishments(submissive_id: int) -> List[Dict[str, Any]]:
     """Get active punishments for a submissive."""
     async with aiosqlite.connect(DATABASE_NAME) as db:

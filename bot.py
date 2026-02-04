@@ -1264,6 +1264,96 @@ async def reward_edit(
             ephemeral=True
         )
 
+@bot.tree.command(name="reward_claim", description="Claim a reward with your points")
+@app_commands.describe(
+    reward_id="The ID of the reward to claim"
+)
+async def reward_claim(interaction: discord.Interaction, reward_id: int):
+    """Claim a reward by spending points (submissive only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'submissive':
+        await interaction.response.send_message(
+            "❌ Only submissives can claim rewards!",
+            ephemeral=True
+        )
+        return
+    
+    # Get dominant(s)
+    dominants = await db.get_dominants(interaction.user.id)
+    if not dominants:
+        await interaction.response.send_message(
+            "❌ You're not linked to a dominant!",
+            ephemeral=True
+        )
+        return
+    
+    # Get reward details from any of the dominants
+    import aiosqlite
+    reward = None
+    reward_dominant_id = None
+    
+    for dominant in dominants:
+        async with aiosqlite.connect(db.DATABASE_NAME) as database:
+            database.row_factory = aiosqlite.Row
+            async with database.execute(
+                "SELECT * FROM rewards WHERE id = ? AND dominant_id = ?",
+                (reward_id, dominant['user_id'])
+            ) as cursor:
+                result = await cursor.fetchone()
+                if result:
+                    reward = dict(result)
+                    reward_dominant_id = dominant['user_id']
+                    break
+    
+    if not reward:
+        await interaction.response.send_message(
+            "❌ Reward not found! Use `/rewards` to see available rewards.",
+            ephemeral=True
+        )
+        return
+    
+    # Check if submissive can afford it
+    if user['points'] < reward['point_cost']:
+        await interaction.response.send_message(
+            f"❌ Not enough points! You have **{user['points']}** points, but need **{reward['point_cost']}** points.",
+            ephemeral=True
+        )
+        return
+    
+    # Deduct points
+    new_total = await db.update_points(interaction.user.id, -reward['point_cost'])
+    
+    # Assign reward
+    await db.assign_reward(interaction.user.id, reward_dominant_id, reward_id, "Self-claimed")
+    
+    embed = discord.Embed(
+        title="🎉 Reward Claimed!",
+        description=f"You've successfully claimed a reward!",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="Reward", value=reward['title'], inline=False)
+    embed.add_field(name="Description", value=reward['description'], inline=False)
+    embed.add_field(name="Cost", value=f"-{reward['point_cost']} points", inline=True)
+    embed.add_field(name="New Balance", value=f"{new_total} points", inline=True)
+    embed.set_footer(text=f"Reward ID: {reward_id}")
+    
+    await interaction.response.send_message(embed=embed)
+    
+    # Notify dominant
+    try:
+        dom_user = await bot.fetch_user(reward_dominant_id)
+        notif = discord.Embed(
+            title="🎁 Reward Claimed",
+            description=f"**{interaction.user.display_name}** has claimed a reward!",
+            color=discord.Color.gold()
+        )
+        notif.add_field(name="Reward", value=reward['title'], inline=False)
+        notif.add_field(name="Cost", value=f"{reward['point_cost']} points", inline=True)
+        notif.add_field(name="Submissive's New Balance", value=f"{new_total} points", inline=True)
+        await dom_user.send(embed=notif)
+    except:
+        pass
+
 # ============ PUNISHMENT COMMANDS ============
 
 @bot.tree.command(name="punishment_create", description="Create a new punishment")

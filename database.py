@@ -1092,3 +1092,68 @@ async def get_random_punishment(dominant_id: int) -> Optional[Dict[str, Any]]:
         """, (dominant_id,)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+# Autocomplete helper functions
+async def get_punishment_by_name(dominant_id: int, title: str) -> Optional[Dict[str, Any]]:
+    """Get a punishment by its title."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM punishments WHERE dominant_id = ? AND title = ?",
+            (dominant_id, title)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+async def get_reward_by_name(dominant_id: int, title: str) -> Optional[Dict[str, Any]]:
+    """Get a reward by its title."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM rewards WHERE dominant_id = ? AND title = ?",
+            (dominant_id, title)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+async def get_task_by_name(dominant_id: int, submissive_id: int, title: str) -> Optional[Dict[str, Any]]:
+    """Get an active task by its title for a specific submissive."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM tasks WHERE dominant_id = ? AND submissive_id = ? AND title = ? AND active = 1",
+            (dominant_id, submissive_id, title)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+async def get_pending_task_completions_for_autocomplete(dominant_id: int) -> List[Dict[str, Any]]:
+    """Get pending task completions with task info for autocomplete."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT tc.id, tc.task_id, t.title, u.username as submissive_name
+            FROM task_completions tc
+            JOIN tasks t ON tc.task_id = t.id
+            JOIN users u ON tc.submissive_id = u.user_id
+            WHERE t.dominant_id = ? AND tc.approval_status = 'pending'
+            ORDER BY tc.submitted_at ASC
+        """, (dominant_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+async def get_pending_punishment_assignments_for_autocomplete(dominant_id: int) -> List[Dict[str, Any]]:
+    """Get pending/submitted punishment assignments with punishment info for autocomplete."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT ap.id, ap.item_id, p.title, u.username as submissive_name, ap.completion_status
+            FROM assigned_rewards_punishments ap
+            JOIN punishments p ON ap.item_id = p.id
+            JOIN users u ON ap.submissive_id = u.user_id
+            WHERE ap.dominant_id = ? AND ap.type = 'punishment' 
+            AND ap.completion_status IN ('submitted', 'expired')
+            ORDER BY ap.submitted_at ASC
+        """, (dominant_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]

@@ -74,6 +74,82 @@ async def post_to_channel(guild: discord.Guild, channel_name: str, embed: discor
     
     return False
 
+# Autocomplete callback functions
+async def punishment_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Autocomplete for punishment names."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        return []
+    
+    punishments = await db.get_punishments(interaction.user.id)
+    return [
+        app_commands.Choice(name=p['title'], value=p['title'])
+        for p in punishments if current.lower() in p['title'].lower()
+    ][:25]  # Discord limits to 25 choices
+
+async def reward_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Autocomplete for reward names."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        return []
+    
+    rewards = await db.get_rewards(interaction.user.id)
+    return [
+        app_commands.Choice(name=r['title'], value=r['title'])
+        for r in rewards if current.lower() in r['title'].lower()
+    ][:25]
+
+async def task_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Autocomplete for task names (requires submissive to be selected first)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        return []
+    
+    # Get submissive from the current interaction namespace
+    # This only works if submissive parameter comes before task in command definition
+    try:
+        submissive = interaction.namespace.submissive
+        if not submissive:
+            return []
+        
+        tasks = await db.get_tasks(submissive.id, active_only=True)
+        return [
+            app_commands.Choice(name=t['title'], value=t['title'])
+            for t in tasks if current.lower() in t['title'].lower()
+        ][:25]
+    except:
+        return []
+
+async def pending_task_completion_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Autocomplete for pending task completions."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        return []
+    
+    pending_items = await db.get_pending_task_completions_for_autocomplete(interaction.user.id)
+    return [
+        app_commands.Choice(
+            name=f"{item['title']} - {item['submissive_name']} (#{item['id']})",
+            value=str(item['id'])
+        )
+        for item in pending_items if current.lower() in item['title'].lower() or current in str(item['id'])
+    ][:25]
+
+async def pending_punishment_assignment_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Autocomplete for pending punishment assignments."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        return []
+    
+    pending_items = await db.get_pending_punishment_assignments_for_autocomplete(interaction.user.id)
+    return [
+        app_commands.Choice(
+            name=f"{item['title']} - {item['submissive_name']} (#{item['id']})",
+            value=str(item['id'])
+        )
+        for item in pending_items if current.lower() in item['title'].lower() or current in str(item['id'])
+    ][:25]
+
 @tasks.loop(minutes=5)
 async def check_deadlines():
     """Check for expired tasks and punishments, deduct points."""
@@ -859,7 +935,20 @@ async def reward_create(
         )
         return
     
-    reward_id = await db.create_reward(interaction.user.id, title, description, cost)
+    try:
+        reward_id = await db.create_reward(interaction.user.id, title, description, cost)
+    except Exception as e:
+        if "UNIQUE constraint failed" in str(e):
+            await interaction.response.send_message(
+                f"❌ A reward named '{title}' already exists! Please use a different name.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ Failed to create reward: {str(e)}",
+                ephemeral=True
+            )
+        return
     
     embed = discord.Embed(
         title="🎁 Reward Created",
@@ -1107,7 +1196,20 @@ async def punishment_create(
         )
         return
     
-    punishment_id = await db.create_punishment(interaction.user.id, title, description)
+    try:
+        punishment_id = await db.create_punishment(interaction.user.id, title, description)
+    except Exception as e:
+        if "UNIQUE constraint failed" in str(e):
+            await interaction.response.send_message(
+                f"❌ A punishment named '{title}' already exists! Please use a different name.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ Failed to create punishment: {str(e)}",
+                ephemeral=True
+            )
+        return
     
     embed = discord.Embed(
         title="⚠️ Punishment Created",
@@ -1171,8 +1273,9 @@ async def punishments(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="punishment_delete", description="Delete a punishment")
-@app_commands.describe(punishment_id="The ID of the punishment to delete")
-async def punishment_delete(interaction: discord.Interaction, punishment_id: int):
+@app_commands.describe(punishment_name="The punishment to delete")
+@app_commands.autocomplete(punishment_name=punishment_autocomplete)
+async def punishment_delete(interaction: discord.Interaction, punishment_name: str):
     """Delete a punishment (dominant only)."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
@@ -1182,31 +1285,41 @@ async def punishment_delete(interaction: discord.Interaction, punishment_id: int
         )
         return
     
-    success = await db.delete_punishment(punishment_id, interaction.user.id)
+    # Look up punishment by name
+    punishment = await db.get_punishment_by_name(interaction.user.id, punishment_name)
+    if not punishment:
+        await interaction.response.send_message(
+            f"❌ Punishment '{punishment_name}' not found!",
+            ephemeral=True
+        )
+        return
+    
+    success = await db.delete_punishment(punishment['id'], interaction.user.id)
     if success:
         embed = discord.Embed(
             title="🗑️ Punishment Deleted",
-            description=f"Punishment #{punishment_id} has been permanently deleted.",
+            description=f"**{punishment_name}** has been permanently deleted.",
             color=discord.Color.orange()
         )
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message(
-            "❌ Punishment not found or you don't have permission to delete it!",
+            "❌ Failed to delete punishment!",
             ephemeral=True
         )
 
 @bot.tree.command(name="punishment_edit", description="Edit an existing punishment")
 @app_commands.describe(
-    punishment_id="The ID of the punishment to edit",
-    title="New punishment title (optional)",
-    description="New punishment description (optional)"
+    punishment_name="The punishment to edit",
+    new_title="New punishment title (optional)",
+    new_description="New punishment description (optional)"
 )
+@app_commands.autocomplete(punishment_name=punishment_autocomplete)
 async def punishment_edit(
     interaction: discord.Interaction,
-    punishment_id: int,
-    title: str = None,
-    description: str = None
+    punishment_name: str,
+    new_title: str = None,
+    new_description: str = None
 ):
     """Edit a punishment (dominant only)."""
     user = await db.get_user(interaction.user.id)
@@ -1217,41 +1330,51 @@ async def punishment_edit(
         )
         return
     
-    success = await db.edit_punishment(punishment_id, interaction.user.id, title=title, description=description)
+    # Look up punishment by name
+    punishment = await db.get_punishment_by_name(interaction.user.id, punishment_name)
+    if not punishment:
+        await interaction.response.send_message(
+            f"❌ Punishment '{punishment_name}' not found!",
+            ephemeral=True
+        )
+        return
+    
+    success = await db.edit_punishment(punishment['id'], interaction.user.id, title=new_title, description=new_description)
     
     if success:
         embed = discord.Embed(
             title="✏️ Punishment Updated",
-            description=f"Punishment #{punishment_id} has been updated.",
+            description=f"**{punishment_name}** has been updated.",
             color=discord.Color.red()
         )
         
-        if title:
-            embed.add_field(name="New Title", value=title, inline=False)
-        if description:
-            embed.add_field(name="New Description", value=description, inline=False)
+        if new_title:
+            embed.add_field(name="New Title", value=new_title, inline=False)
+        if new_description:
+            embed.add_field(name="New Description", value=new_description, inline=False)
         
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message(
-            "❌ Punishment not found or you don't have permission to edit it!",
+            "❌ Failed to update punishment!",
             ephemeral=True
         )
 
 @bot.tree.command(name="punishment_assign", description="Assign a punishment to a submissive")
 @app_commands.describe(
     submissive="The submissive to punish",
-    punishment_id="The punishment ID",
+    punishment_name="The punishment to assign",
     reason="Reason for the punishment (optional)",
     deadline_hours="Hours to complete (default: 24)",
     deadline_datetime="Specific deadline (YYYY-MM-DD HH:MM format, e.g., 2026-02-05 15:30)",
     point_penalty="Points deducted if not completed (default: 10)",
     forward_to="User who will receive the proof image (optional)"
 )
+@app_commands.autocomplete(punishment_name=punishment_autocomplete)
 async def punishment_assign(
     interaction: discord.Interaction,
     submissive: discord.Member,
-    punishment_id: int,
+    punishment_name: str,
     reason: str = None,
     deadline_hours: int = 24,
     deadline_datetime: str = None,
@@ -1266,6 +1389,17 @@ async def punishment_assign(
             ephemeral=True
         )
         return
+    
+    # Look up punishment by name
+    punishment = await db.get_punishment_by_name(interaction.user.id, punishment_name)
+    if not punishment:
+        await interaction.response.send_message(
+            f"❌ Punishment '{punishment_name}' not found!",
+            ephemeral=True
+        )
+        return
+    
+    punishment_id = punishment['id']
     
     # Calculate deadline - prioritize specific datetime over hours
     if deadline_datetime:
@@ -1296,7 +1430,7 @@ async def punishment_assign(
         description=f"Punishment assigned to {submissive.mention}",
         color=discord.Color.red()
     )
-    embed.add_field(name="Punishment ID", value=str(punishment_id), inline=True)
+    embed.add_field(name="Punishment", value=f"**{punishment_name}** (ID: {punishment_id})", inline=False)
     embed.add_field(name="Assignment ID", value=str(assignment_id), inline=True)
     embed.add_field(name="Deadline", value=f"<t:{int(deadline.timestamp())}:R>", inline=False)
     embed.add_field(name="Point Penalty", value=f"{point_penalty} (doubles if late)", inline=True)

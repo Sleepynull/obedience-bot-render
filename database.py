@@ -878,10 +878,11 @@ async def get_punishment_forward_user(assignment_id: int) -> Optional[int]:
 async def submit_punishment_proof(assignment_id: int, proof_url: str) -> bool:
     """Submit proof of punishment completion."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Allow submission for both 'pending' and 'expired' punishments
         await db.execute("""
             UPDATE assigned_rewards_punishments 
             SET proof_url = ?, completion_status = 'submitted', submitted_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND type = 'punishment' AND completion_status = 'pending'
+            WHERE id = ? AND type = 'punishment' AND completion_status IN ('pending', 'expired')
         """, (proof_url, assignment_id))
         await db.commit()
         return True

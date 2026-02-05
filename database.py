@@ -628,6 +628,22 @@ async def delete_task(task_id: int, dominant_id: int) -> bool:
         await db.commit()
         return True
 
+async def reactivate_task(task_id: int, dominant_id: int, deadline: datetime.datetime) -> bool:
+    """Reactivate an inactive task with a new deadline (dominant only)."""
+    async with aiosqlite.connect(DATABASE_NAME) as db:
+        # Verify dominant owns this task
+        async with db.execute("SELECT id FROM tasks WHERE id = ? AND dominant_id = ?", (task_id, dominant_id)) as cursor:
+            if not await cursor.fetchone():
+                return False
+        
+        # Reactivate and set new deadline
+        await db.execute(
+            "UPDATE tasks SET active = 1, deadline = ? WHERE id = ?",
+            (deadline, task_id)
+        )
+        await db.commit()
+        return True
+
 async def edit_task(task_id: int, dominant_id: int, title: str = None, description: str = None, 
                    point_value: int = None, deadline: datetime.datetime = None, reminder_interval_hours: int = None) -> bool:
     """Edit a task (dominant only). Only updates provided fields."""

@@ -932,6 +932,43 @@ async def task_delete(interaction: discord.Interaction, task_id: int):
             ephemeral=True
         )
 
+@bot.tree.command(name="task_reactivate", description="Reactivate an inactive task")
+@app_commands.describe(
+    task_id="The ID of the task to reactivate",
+    deadline_hours="New deadline in hours (optional, default: 24)"
+)
+async def task_reactivate(
+    interaction: discord.Interaction,
+    task_id: int,
+    deadline_hours: int = 24
+):
+    """Reactivate an inactive task (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can reactivate tasks!",
+            ephemeral=True
+        )
+        return
+    
+    # Calculate new deadline
+    new_deadline = datetime.datetime.now() + datetime.timedelta(hours=deadline_hours)
+    
+    success = await db.reactivate_task(task_id, interaction.user.id, new_deadline)
+    if success:
+        embed = discord.Embed(
+            title="✅ Task Reactivated",
+            description=f"Task #{task_id} has been reactivated and is now active again.",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="New Deadline", value=f"<t:{int(new_deadline.timestamp())}:R>", inline=True)
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(
+            "❌ Task not found or you don't have permission to reactivate it!",
+            ephemeral=True
+        )
+
 @bot.tree.command(name="task_edit", description="Edit an existing task")
 @app_commands.describe(
     task_id="The ID of the task to edit",

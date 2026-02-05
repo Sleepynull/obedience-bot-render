@@ -1175,6 +1175,7 @@ async def get_pending_punishment_assignments_for_autocomplete(dominant_id: int) 
     """Get pending/submitted punishment assignments with punishment info for autocomplete."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
         db.row_factory = aiosqlite.Row
+        print(f"[DB] Querying punishment assignments for dominant_id={dominant_id}")
         async with db.execute("""
             SELECT ap.id, ap.item_id, p.title, u.username as submissive_name, ap.completion_status
             FROM assigned_rewards_punishments ap
@@ -1185,7 +1186,9 @@ async def get_pending_punishment_assignments_for_autocomplete(dominant_id: int) 
             ORDER BY ap.submitted_at ASC
         """, (dominant_id,)) as cursor:
             rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            result = [dict(row) for row in rows]
+            print(f"[DB] Query returned {len(result)} rows: {result}")
+            return result
 
 # Reminder operations
 async def get_tasks_needing_reminders() -> List[Dict[str, Any]]:

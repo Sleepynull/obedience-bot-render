@@ -165,9 +165,12 @@ async def pending_punishment_assignment_autocomplete(interaction: discord.Intera
     """Autocomplete for pending punishment assignments."""
     user = await db.get_user(interaction.user.id)
     if not user or user['role'] != 'dominant':
+        print(f"[AUTOCOMPLETE] User {interaction.user.id} not dominant or doesn't exist")
         return []
     
     pending_items = await db.get_pending_punishment_assignments_for_autocomplete(interaction.user.id)
+    print(f"[AUTOCOMPLETE] Found {len(pending_items)} pending punishment assignments for dominant {interaction.user.id}")
+    print(f"[AUTOCOMPLETE] Items: {pending_items}")
     return [
         app_commands.Choice(
             name=f"{item['title']} - {item['submissive_name']} (#{item['id']})",

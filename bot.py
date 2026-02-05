@@ -401,8 +401,6 @@ async def on_ready():
     check_recurring_tasks.start()  # Start recurring task reset checker
     send_reminders.start()  # Start reminder sender
     try:
-        # Clear commands first, then sync
-        bot.tree.clear_commands(guild=None)
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s)")
     except Exception as e:

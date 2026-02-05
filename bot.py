@@ -2082,6 +2082,47 @@ async def punishment_remind(interaction: discord.Interaction, assignment_id: int
             ephemeral=True
         )
 
+@bot.tree.command(name="punishment_pending", description="View pending punishment submissions awaiting review")
+async def punishment_pending(interaction: discord.Interaction):
+    """View pending punishment submissions (dominant only)."""
+    user = await db.get_user(interaction.user.id)
+    if not user or user['role'] != 'dominant':
+        await interaction.response.send_message(
+            "❌ Only dominants can view pending punishments!",
+            ephemeral=True
+        )
+        return
+    
+    pending_list = await db.get_pending_punishments(interaction.user.id)
+    
+    if not pending_list:
+        await interaction.response.send_message(
+            "✅ No pending punishment submissions!",
+            ephemeral=True
+        )
+        return
+    
+    embed = discord.Embed(
+        title="📋 Pending Punishment Submissions",
+        description=f"{len(pending_list)} punishment(s) awaiting review",
+        color=discord.Color.orange()
+    )
+    
+    for item in pending_list[:10]:  # Show max 10
+        value = f"**Submissive:** {item['submissive_name']}\n**Punishment:** {item['title']}\n**Status:** {item['completion_status'].capitalize()}"
+        if item.get('submitted_at'):
+            value += f"\n**Submitted:** <t:{int(datetime.datetime.fromisoformat(item['submitted_at']).timestamp())}:R>"
+        if item.get('proof_url'):
+            value += f"\n[View Proof]({item['proof_url']})"
+        embed.add_field(
+            name=f"Assignment ID: {item['id']}",
+            value=value,
+            inline=False
+        )
+    
+    embed.set_footer(text="Use /punishment_approve or /punishment_reject to review")
+    await interaction.response.send_message(embed=embed)
+
 @bot.tree.command(name="punishments_active", description="View your active punishments")
 async def punishments_active(interaction: discord.Interaction):
     """View active punishments (submissive only)."""

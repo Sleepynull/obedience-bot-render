@@ -231,8 +231,11 @@ async def check_deadlines():
             )
             await db.mark_threshold_triggered(threshold['id'])
         
-        # Deactivate task
-        await db.deactivate_expired_task(task['id'])
+        # Only deactivate one-time tasks (not daily/weekly/custom)
+        # Recurring tasks stay active and will reset when completion is approved
+        frequency = task.get('frequency', 'daily')
+        if frequency not in ('daily', 'weekly', 'custom'):
+            await db.deactivate_expired_task(task['id'])
         
         # Notify submissive
         try:

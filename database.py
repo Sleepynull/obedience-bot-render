@@ -413,10 +413,10 @@ async def approve_task_completion(completion_id: int, reviewer_id: int, approved
                                   reset_deadline_on_reject: bool = False) -> Optional[int]:
     """Approve or reject a task completion. Returns points if approved."""
     async with aiosqlite.connect(DATABASE_NAME) as db:
-        # Get completion info and associated task
+        # Get completion info and associated task with all necessary fields
         async with db.execute("""
             SELECT tc.submissive_id, tc.points_earned, tc.approval_status, tc.task_id,
-                   t.deadline_time, t.submissive_id as task_submissive_id
+                   t.deadline_time, t.submissive_id as task_submissive_id, t.frequency, t.deadline
             FROM task_completions tc
             JOIN tasks t ON tc.task_id = t.id
             WHERE tc.id = ?
@@ -424,7 +424,7 @@ async def approve_task_completion(completion_id: int, reviewer_id: int, approved
             row = await cursor.fetchone()
             if not row or row[2] != 'pending':
                 return None
-            submissive_id, points, _, task_id, deadline_time, task_submissive_id = row
+            submissive_id, points, _, task_id, deadline_time, task_submissive_id, frequency, old_deadline = row
         
         status = 'approved' if approved else 'rejected'
         
@@ -435,37 +435,53 @@ async def approve_task_completion(completion_id: int, reviewer_id: int, approved
             WHERE id = ?
         """, (status, reviewer_id, completion_id))
         
-        # Handle deadline reset for both approval and reject_cancel
-        should_reset_deadline = (approved or reset_deadline_on_reject) and deadline_time
+        # Determine if task should be reset based on frequency
+        # Reset if: (approved OR reset_deadline_on_reject) AND frequency is not one-time (has deadline)
+        should_reset = (approved or reset_deadline_on_reject) and old_deadline is not None and frequency in ('daily', 'weekly', 'custom')
         
-        if should_reset_deadline:
+        if should_reset:
             # Get submissive's timezone
             sub_timezone = await get_user_timezone(task_submissive_id)
             user_tz = pytz.timezone(sub_timezone)
             
-            # Calculate next deadline
-            try:
-                time_parts = deadline_time.split(':')
-                hour = int(time_parts[0])
-                minute = int(time_parts[1])
-                
-                # Get current time in user's timezone
+            new_deadline = None
+            
+            # Calculate next deadline based on what's available
+            if deadline_time:
+                # Use deadline_time if available (preferred for daily tasks)
+                try:
+                    time_parts = deadline_time.split(':')
+                    hour = int(time_parts[0])
+                    minute = int(time_parts[1])
+                    
+                    # Get current time in user's timezone
+                    now = datetime.datetime.now(user_tz)
+                    new_deadline = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    
+                    # If time has already passed today, set for tomorrow
+                    if new_deadline <= now:
+                        new_deadline = new_deadline + datetime.timedelta(days=1)
+                except (ValueError, IndexError):
+                    pass
+            
+            # Fallback: use frequency to calculate next deadline
+            if new_deadline is None:
                 now = datetime.datetime.now(user_tz)
-                new_deadline = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                
-                # If time has already passed today, set for tomorrow
-                if new_deadline <= now:
-                    new_deadline = new_deadline + datetime.timedelta(days=1)
-                
-                # Reset deadline and reactivate task
+                if frequency == 'daily':
+                    new_deadline = now + datetime.timedelta(days=1)
+                elif frequency == 'weekly':
+                    new_deadline = now + datetime.timedelta(weeks=1)
+                elif frequency == 'custom':
+                    # Default to 24 hours for custom if no other info
+                    new_deadline = now + datetime.timedelta(hours=24)
+            
+            # Reset deadline and reactivate task
+            if new_deadline:
                 await db.execute("""
                     UPDATE tasks 
                     SET deadline = ?, active = 1
                     WHERE id = ?
                 """, (new_deadline, task_id))
-            except (ValueError, IndexError):
-                # If there's an issue parsing deadline_time, just continue without resetting
-                pass
         
         await db.commit()
         return points if approved else 0

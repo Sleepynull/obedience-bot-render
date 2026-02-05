@@ -1756,13 +1756,13 @@ async def punishment_complete(interaction: discord.Interaction, assignment_id: i
             if has_forward:
                 notif.add_field(name="📸 Forward Pending", value="Will be sent after approval", inline=True)
             notif.set_image(url=proof.url)
-            notif.set_footer(text=f"Use /punishment_approve {assignment_id} or /punishment_reject {assignment_id}")
+            notif.set_footer(text=f"Use /punishment_approve assignment:{assignment_id} or /punishment_reject assignment:{assignment_id}")
             await dom_user.send(embed=notif)
         except:
             pass
 
 @bot.tree.command(name="punishment_approve", description="Approve a punishment completion")
-@app_commands.describe(assignment="The punishment assignment to approve")
+@app_commands.describe(assignment="The punishment (select from dropdown or enter assignment ID)")
 @app_commands.autocomplete(assignment=pending_punishment_assignment_autocomplete)
 async def punishment_approve(interaction: discord.Interaction, assignment: str):
     """Approve punishment completion (dominant only)."""
@@ -1774,12 +1774,12 @@ async def punishment_approve(interaction: discord.Interaction, assignment: str):
         )
         return
     
-    # Convert assignment string to int
+    # Convert assignment string to int (works for both autocomplete selection and manual ID entry)
     try:
         assignment_id = int(assignment)
     except ValueError:
         await interaction.response.send_message(
-            "❌ Invalid assignment ID!",
+            "❌ Invalid assignment ID! Please enter a number or select from the dropdown.",
             ephemeral=True
         )
         return
@@ -1879,7 +1879,7 @@ async def punishment_approve(interaction: discord.Interaction, assignment: str):
 
 @bot.tree.command(name="punishment_reject", description="Reject a punishment completion")
 @app_commands.describe(
-    assignment="The punishment assignment to reject",
+    assignment="The punishment (select from dropdown or enter assignment ID)",
     reason="Reason for rejection"
 )
 @app_commands.autocomplete(assignment=pending_punishment_assignment_autocomplete)
@@ -1893,12 +1893,12 @@ async def punishment_reject(interaction: discord.Interaction, assignment: str, r
         )
         return
     
-    # Convert assignment string to int
+    # Convert assignment string to int (works for both autocomplete selection and manual ID entry)
     try:
         assignment_id = int(assignment)
     except ValueError:
         await interaction.response.send_message(
-            "❌ Invalid assignment ID!",
+            "❌ Invalid assignment ID! Please enter a number or select from the dropdown.",
             ephemeral=True
         )
         return
